@@ -33,14 +33,20 @@ namespace ITBees.FAS.Stripe
                 {
                     PriceData = new SessionLineItemPriceDataOptions()
                     {
-                        UnitAmount = product.Quantity,
+
                         Currency = product.Currency,
                         ProductData = new SessionLineItemPriceDataProductDataOptions()
                         {
                             Name = product.PaymentTitleOrProductName,
+                        },
+                        UnitAmountDecimal = product.Price * product.Quantity,
+                        Recurring = new SessionLineItemPriceDataRecurringOptions()
+                        {
+                            Interval = product.Interval,
+                            IntervalCount = product.IntervalCount
                         }
                     },
-                    Quantity = product.Quantity
+                    Quantity = product.Quantity,
 
                 });
             }
