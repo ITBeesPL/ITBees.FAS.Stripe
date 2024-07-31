@@ -52,9 +52,32 @@ namespace ITBees.FAS.Stripe
             }
 
             var service = new SessionService();
+            options.ClientReferenceId = fasPayment.ToString();
             Session session = service.Create(options);
 
-            return new FasActivePaymentSession(session.Url);
+            return new FasActivePaymentSession(session.Url,session.Id);
+        }
+
+        public bool ConfirmPayment(Guid paymentSessionGuid)
+        {
+            var sessionService = new SessionService();
+            var options = new SessionListOptions
+            {
+                Limit = 1
+            };
+
+            // Add the client_reference_id filter
+            options.AddExtraParam("client_reference_id", paymentSessionGuid);
+
+            var sessions = sessionService.List(options);
+
+            if (sessions != null && sessions.Data != null && sessions.Data.Count > 0)
+            {
+                var session = sessions.Data[0];
+                return session.PaymentStatus == "paid";
+            }
+
+            return false;
         }
 
         public StripeSettings StripeSettings { get; }
