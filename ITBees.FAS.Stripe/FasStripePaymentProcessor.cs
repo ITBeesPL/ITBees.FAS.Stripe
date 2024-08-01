@@ -21,8 +21,8 @@ namespace ITBees.FAS.Stripe
         {
             var options = new SessionCreateOptions()
             {
-                SuccessUrl = _platformSettingsService.GetSetting("PaymentSuccessUrl"),
-                CancelUrl = _platformSettingsService.GetSetting("PaymentCancelUrl"),
+                SuccessUrl = $"{_platformSettingsService.GetSetting("PaymentSuccessUrl")}?guid={fasPayment.PaymentSessionGuid}",
+                CancelUrl = $"{_platformSettingsService.GetSetting("PaymentCancelUrl")}?guid={fasPayment.PaymentSessionGuid}",
                 LineItems = new List<SessionLineItemOptions>(),
                 Mode = fasPayment.Mode.ToString().ToLower(),
             };
