@@ -80,6 +80,8 @@ namespace ITBees.FAS.Stripe
             return false;
         }
 
+        public string ProcessorName => "Stripe";
+
         public StripeSettings StripeSettings { get; }
     }
 }
