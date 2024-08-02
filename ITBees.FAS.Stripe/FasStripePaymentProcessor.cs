@@ -46,13 +46,15 @@ namespace ITBees.FAS.Stripe
                             IntervalCount = product.IntervalCount
                         }
                     },
-                    Quantity = product.Quantity,
+                    Quantity = product.Quantity
 
                 });
             }
 
             var service = new SessionService();
             options.ClientReferenceId = fasPayment.ToString();
+            options.CustomerEmail = fasPayment.CustomerEmail;
+            options.CustomerEmail = fasPayment.CustomerName;
             Session session = service.Create(options);
 
             return new FasActivePaymentSession(session.Url,session.Id);
