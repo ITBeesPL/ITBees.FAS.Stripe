@@ -94,22 +94,33 @@ namespace ITBees.FAS.Stripe
             var sessionService = new SessionService();
             var options = new SessionListOptions
             {
-                Limit = 1
+                Limit = 100,
+                Created = new DateRangeOptions
+                {
+                    GreaterThanOrEqual = DateTime.UtcNow.AddDays(-2)
+                }
             };
 
-            // Add the client_reference_id filter
-            options.AddExtraParam("client_reference_id", paymentSessionGuid);
-
-            var sessions = sessionService.List(options);
-
-            if (sessions != null && sessions.Data != null && sessions.Data.Count > 0)
+            StripeList<Session> sessions = null;
+            do
             {
-                var session = sessions.Data[0];
-                return session.PaymentStatus == "paid";
-            }
+                sessions = sessionService.List(options);
+
+                if (sessions != null && sessions.Data != null && sessions.Data.Count > 0)
+                {
+                    var session = sessions.Data.FirstOrDefault(s => s.ClientReferenceId == paymentSessionGuid.ToString());
+                    if (session != null)
+                    {
+                        return session.PaymentStatus == "paid";
+                    }
+
+                    options.StartingAfter = sessions.Data.Last().Id;
+                }
+            } while (sessions.HasMore);
 
             return false;
         }
+
 
         public string ProcessorName => "Stripe";
 
