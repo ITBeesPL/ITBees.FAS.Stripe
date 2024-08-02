@@ -42,7 +42,7 @@ namespace ITBees.FAS.Stripe
                         UnitAmountDecimal = product.Price * product.Quantity,
                         Recurring = new SessionLineItemPriceDataRecurringOptions()
                         {
-                            Interval = product.Interval,
+                            Interval = GetStripeInterval(product.BillingPeriod),
                             IntervalCount = product.IntervalCount
                         }
                     },
@@ -56,6 +56,36 @@ namespace ITBees.FAS.Stripe
             Session session = service.Create(options);
 
             return new FasActivePaymentSession(session.Url,session.Id);
+        }
+
+        private string GetStripeInterval(FasBillingPeriod productBillingPeriod)
+        {
+            switch (productBillingPeriod)
+            {
+                case FasBillingPeriod.Daily:
+                    return "day";
+                    break;
+                case FasBillingPeriod.Weekly:
+                    return "week";
+                    break;
+                case FasBillingPeriod.Monthly:
+                    return "month";
+                    break;
+                case FasBillingPeriod.Every3Months:
+                    return "month";
+                    break;
+                case FasBillingPeriod.Every6Months:
+                    return "month";
+                    break;
+                case FasBillingPeriod.Yearly:
+                    return "year";
+                    break;
+                case FasBillingPeriod.Custom:
+                    return "custom";
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(productBillingPeriod), productBillingPeriod, null);
+            }
         }
 
         public bool ConfirmPayment(Guid paymentSessionGuid)
