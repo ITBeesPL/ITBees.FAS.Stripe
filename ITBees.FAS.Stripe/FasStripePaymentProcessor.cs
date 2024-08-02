@@ -39,7 +39,7 @@ namespace ITBees.FAS.Stripe
                         {
                             Name = product.PaymentTitleOrProductName,
                         },
-                        UnitAmountDecimal = product.Price * product.Quantity,
+                        UnitAmountDecimal = product.Price * 100 * product.Quantity,
                         Recurring = new SessionLineItemPriceDataRecurringOptions()
                         {
                             Interval = GetStripeInterval(product.BillingPeriod),
@@ -56,7 +56,7 @@ namespace ITBees.FAS.Stripe
             options.CustomerEmail = fasPayment.CustomerEmail;
             Session session = service.Create(options);
 
-            return new FasActivePaymentSession(session.Url,session.Id);
+            return new FasActivePaymentSession(session.Url, session.Id);
         }
 
         private string GetStripeInterval(FasBillingPeriod productBillingPeriod)
