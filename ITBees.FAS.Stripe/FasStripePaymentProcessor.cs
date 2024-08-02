@@ -54,7 +54,6 @@ namespace ITBees.FAS.Stripe
             var service = new SessionService();
             options.ClientReferenceId = fasPayment.ToString();
             options.CustomerEmail = fasPayment.CustomerEmail;
-            options.CustomerEmail = fasPayment.CustomerName;
             Session session = service.Create(options);
 
             return new FasActivePaymentSession(session.Url,session.Id);
