@@ -17,37 +17,41 @@ namespace ITBees.FAS.Stripe
             StripeConfiguration.ApiKey = StripeSettings.SecretKey;
         }
 
-        public FasActivePaymentSession CreatePaymentSession(FasPayment fasPayment)
+        public FasActivePaymentSession CreatePaymentSession(FasPayment fasPayment, bool oneTimePayment)
         {
             var options = new SessionCreateOptions()
             {
                 SuccessUrl = $"{_platformSettingsService.GetSetting("PaymentSuccessUrl")}?guid={fasPayment.PaymentSessionGuid}",
                 CancelUrl = $"{_platformSettingsService.GetSetting("PaymentCancelUrl")}?guid={fasPayment.PaymentSessionGuid}",
                 LineItems = new List<SessionLineItemOptions>(),
-                Mode = fasPayment.Mode.ToString().ToLower(),
+                Mode = oneTimePayment ? "payment" : "subscription",
             };
 
             foreach (var product in fasPayment.Products)
             {
+                SessionLineItemPriceDataRecurringOptions dataRecurringOptions = null;
+                if (!oneTimePayment)
+                {
+                    dataRecurringOptions = new SessionLineItemPriceDataRecurringOptions()
+                    {
+                        Interval = GetStripeInterval(product.BillingPeriod),
+                        IntervalCount = product.IntervalCount
+                    };
+                }
+
                 options.LineItems.Add(new SessionLineItemOptions()
                 {
                     PriceData = new SessionLineItemPriceDataOptions()
                     {
-
                         Currency = product.Currency,
                         ProductData = new SessionLineItemPriceDataProductDataOptions()
                         {
                             Name = product.PaymentTitleOrProductName,
                         },
                         UnitAmountDecimal = product.Price * 100 * product.Quantity,
-                        Recurring = new SessionLineItemPriceDataRecurringOptions()
-                        {
-                            Interval = GetStripeInterval(product.BillingPeriod),
-                            IntervalCount = product.IntervalCount
-                        }
+                        Recurring = dataRecurringOptions
                     },
                     Quantity = product.Quantity
-
                 });
             }
 
@@ -58,6 +62,7 @@ namespace ITBees.FAS.Stripe
 
             return new FasActivePaymentSession(session.Url, session.Id);
         }
+
 
         private string GetStripeInterval(FasBillingPeriod productBillingPeriod)
         {
