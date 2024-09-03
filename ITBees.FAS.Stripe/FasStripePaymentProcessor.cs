@@ -17,12 +17,14 @@ namespace ITBees.FAS.Stripe
             StripeConfiguration.ApiKey = StripeSettings.SecretKey;
         }
 
-        public FasActivePaymentSession CreatePaymentSession(FasPayment fasPayment, bool oneTimePayment)
+        public FasActivePaymentSession CreatePaymentSession(FasPayment fasPayment, bool oneTimePayment, string successUrl = "", string failUrl = "")
         {
+            var successUrlSetting = string.IsNullOrEmpty(successUrl) ? _platformSettingsService.GetSetting("PaymentSuccessUrl") : successUrl;
+            var failUrlSetting = string.IsNullOrEmpty(failUrl) ? _platformSettingsService.GetSetting("PaymentCancelUrl") : failUrl;
             var options = new SessionCreateOptions()
             {
-                SuccessUrl = $"{_platformSettingsService.GetSetting("PaymentSuccessUrl")}?guid={fasPayment.PaymentSessionGuid}",
-                CancelUrl = $"{_platformSettingsService.GetSetting("PaymentCancelUrl")}?guid={fasPayment.PaymentSessionGuid}",
+                SuccessUrl = $"{successUrlSetting}?guid={fasPayment.PaymentSessionGuid}",
+                CancelUrl = $"{failUrlSetting}?guid={fasPayment.PaymentSessionGuid}",
                 LineItems = new List<SessionLineItemOptions>(),
                 Mode = oneTimePayment ? "payment" : "subscription",
             };
