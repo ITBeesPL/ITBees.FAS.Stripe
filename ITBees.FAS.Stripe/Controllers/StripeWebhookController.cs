@@ -33,12 +33,18 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     public async Task<IActionResult> Handle()
     {
         var json = await new StreamReader(HttpContext.Request.Body).ReadToEndAsync();
+        _logger.LogDebug($"Received stripe webhook request");
+        _logger.LogDebug($"json parsed : \n" + json +"\n\nParse event...");
         var stripeEvent = ParseEvent(json, Request.Headers["Stripe-Signature"]);
+        _logger.LogDebug("parse event finished");
         _paymentDbLoggerService.Log(new PaymentOperatorLog() { Event = stripeEvent.Type, Received = DateTime.Now, Operator = "Stripe webhook", JsonEvent = json });
         if (stripeEvent.Type == Events.CheckoutSessionCompleted)
         {
+            _logger.LogDebug("Event checkout sesion completed");
             var session = stripeEvent.Data.Object as Session;
+            _logger.LogDebug("Closing successfulPayment...");
             _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId));
+            _logger.LogDebug("Closing successfulPayment - done.");
         }
 
         return Ok();
