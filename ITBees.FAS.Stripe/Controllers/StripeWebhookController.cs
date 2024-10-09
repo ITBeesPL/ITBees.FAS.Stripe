@@ -38,7 +38,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         var stripeEvent = ParseEvent(json, Request.Headers["Stripe-Signature"]);
         _logger.LogDebug("parse event finished");
         _paymentDbLoggerService.Log(new PaymentOperatorLog() { Event = stripeEvent.Type, Received = DateTime.Now, Operator = "Stripe webhook", JsonEvent = json });
-        if (stripeEvent.Type == Events.CheckoutSessionCompleted)
+        if (stripeEvent.Type == "checkout.session.completed")
         {
             _logger.LogDebug("Event checkout sesion completed");
             var session = stripeEvent.Data.Object as Session;
