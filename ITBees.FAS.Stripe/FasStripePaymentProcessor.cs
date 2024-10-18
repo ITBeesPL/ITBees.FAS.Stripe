@@ -34,10 +34,11 @@ namespace ITBees.FAS.Stripe
                 SessionLineItemPriceDataRecurringOptions dataRecurringOptions = null;
                 if (!oneTimePayment)
                 {
+                    var stripeInterval = GetStripeInterval(product.BillingPeriod);
                     dataRecurringOptions = new SessionLineItemPriceDataRecurringOptions()
                     {
-                        Interval = GetStripeInterval(product.BillingPeriod),
-                        IntervalCount = product.IntervalCount
+                        Interval = stripeInterval.Name,
+                        IntervalCount = stripeInterval.Count
                     };
                 }
 
@@ -66,34 +67,46 @@ namespace ITBees.FAS.Stripe
         }
 
 
-        private string GetStripeInterval(FasBillingPeriod productBillingPeriod)
+        private Interval GetStripeInterval(FasBillingPeriod productBillingPeriod)
         {
             switch (productBillingPeriod)
             {
                 case FasBillingPeriod.Daily:
-                    return "day";
+                    return new Interval("day", 1);
                     break;
                 case FasBillingPeriod.Weekly:
-                    return "week";
+                    return new Interval("week", 1);
                     break;
                 case FasBillingPeriod.Monthly:
-                    return "month";
+                    return new Interval("month", 1);
                     break;
                 case FasBillingPeriod.Every3Months:
-                    return "month";
+                    return new Interval("month", 3);
                     break;
                 case FasBillingPeriod.Every6Months:
-                    return "month";
+                    return new Interval("month", 6);
                     break;
                 case FasBillingPeriod.Yearly:
-                    return "year";
+                    return new Interval("year", 1);
                     break;
                 case FasBillingPeriod.Custom:
-                    return "custom";
+                    return new Interval("custom", 1);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(productBillingPeriod), productBillingPeriod, null);
             }
+        }
+
+        private class Interval
+        {
+            public Interval(string name, int count)
+            {
+                Name = name;
+                Count = count;
+            }
+
+            public string Name { get; set; }
+            public int Count { get; set; }
         }
 
         public bool ConfirmPayment(Guid paymentSessionGuid)
