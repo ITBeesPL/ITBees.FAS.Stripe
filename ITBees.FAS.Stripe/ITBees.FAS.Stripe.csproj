@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="ITBees.FAS.Payments" Version="8.0.148" />
     <PackageReference Include="ITBees.Fas.Setup" Version="8.0.7" />
     <PackageReference Include="ITBees.Interfaces" Version="8.0.32" />
     <PackageReference Include="ITBees.Models" Version="8.0.52" />
@@ -20,8 +21,8 @@
     <Folder Include="Models\" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!--<ItemGroup>
     <ProjectReference Include="..\..\ITBees.FAS.Payments\ITBees.FAS.Payments\ITBees.FAS.Payments.csproj" />
-  </ItemGroup>
+  </ItemGroup>-->
 
 </Project>
