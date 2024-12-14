@@ -8,17 +8,17 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.156"/>
-        <PackageReference Include="ITBees.Fas.Setup" Version="8.0.7"/>
-        <PackageReference Include="ITBees.Interfaces" Version="8.0.40"/>
-        <PackageReference Include="ITBees.Models" Version="8.0.64"/>
-        <PackageReference Include="Newtonsoft.Json" Version="13.0.3"/>
-        <PackageReference Include="Stripe.net" Version="47.0.0"/>
+        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.157" />
+        <PackageReference Include="ITBees.Fas.Setup" Version="8.0.9" />
+        <PackageReference Include="ITBees.Interfaces" Version="8.0.49" />
+        <PackageReference Include="ITBees.Models" Version="8.0.70" />
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        <PackageReference Include="Stripe.net" Version="47.0.0" />
     </ItemGroup>
 
     <ItemGroup>
-        <Folder Include="Interfaces\"/>
-        <Folder Include="Models\"/>
+        <Folder Include="Interfaces\" />
+        <Folder Include="Models\" />
     </ItemGroup>
 
     <!--    <ItemGroup>-->
