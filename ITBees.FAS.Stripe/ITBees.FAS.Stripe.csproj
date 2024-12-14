@@ -1,28 +1,30 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
-  </PropertyGroup>
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="ITBees.FAS.Payments" Version="8.0.156" />
-    <PackageReference Include="ITBees.Fas.Setup" Version="8.0.7" />
-    <PackageReference Include="ITBees.Interfaces" Version="8.0.40" />
-    <PackageReference Include="ITBees.Models" Version="8.0.64" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Stripe.net" Version="47.0.0" />
-  </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.156"/>
+        <PackageReference Include="ITBees.Fas.Setup" Version="8.0.7"/>
+        <PackageReference Include="ITBees.Interfaces" Version="8.0.40"/>
+        <PackageReference Include="ITBees.Models" Version="8.0.64"/>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3"/>
+        <PackageReference Include="Stripe.net" Version="47.0.0"/>
+    </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="Interfaces\" />
-    <Folder Include="Models\" />
-  </ItemGroup>
+    <ItemGroup>
+        <Folder Include="Interfaces\"/>
+        <Folder Include="Models\"/>
+    </ItemGroup>
 
-  <!--<ItemGroup>
-    <ProjectReference Include="..\..\ITBees.FAS.Payments\ITBees.FAS.Payments\ITBees.FAS.Payments.csproj" />
-  </ItemGroup>-->
+    <!--    <ItemGroup>-->
+    <!--        <ProjectReference Include="..\..\ITBees.FAS.Payments\ITBees.FAS.Payments\ITBees.FAS.Payments.csproj"/>-->
+    <!--        <PackageReference Include="Newtonsoft.Json" Version="13.0.3"/>-->
+    <!--        <PackageReference Include="Stripe.net" Version="47.0.0"/>-->
+    <!--    </ItemGroup>-->
 
 </Project>
