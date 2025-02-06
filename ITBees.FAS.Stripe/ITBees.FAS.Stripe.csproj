@@ -8,7 +8,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.196" />
+        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.197" />
         <PackageReference Include="ITBees.Fas.Setup" Version="8.0.11" />
         <PackageReference Include="ITBees.Interfaces" Version="8.0.56" />
         <PackageReference Include="ITBees.Models" Version="8.0.79" />
