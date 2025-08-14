@@ -20,33 +20,35 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     private readonly IPaymentSessionCreator _paymentSessionCreator;
     private readonly IPlatformSettingsService _platformSettingsService;
     private readonly IPaymentDbLoggerService _paymentDbLoggerService;
+    private readonly IReadOnlyRepository<InvoiceData> _invoiceDataRoRepo;
+    private readonly IWriteOnlyRepository<InvoiceData> _invoiceDataWoRepo;
     private readonly string _webhookSecret;
-    private readonly IReadOnlyRepository<Company> _companyRoRepo;
     private readonly IReadOnlyRepository<UserAccount> _userAccountRoRepo;
     private readonly IApplySubscriptionPlanToCompanyService _applySubscriptionPlanToCompanyService;
     private readonly IReadOnlyRepository<PlatformSubscriptionPlan> _platformSubscriptionPlanRoRepo;
-    private readonly IInvoiceDataService _invoiceDataService;
 
-    public StripeWebhookController(ILogger<StripeWebhookController> logger,
+    public StripeWebhookController(
+        ILogger<StripeWebhookController> logger,
         IPaymentSessionCreator paymentSessionCreator,
         IPlatformSettingsService platformSettingsService,
         IPaymentDbLoggerService paymentDbLoggerService,
-        IReadOnlyRepository<Company> companyRoRepo,
-        IReadOnlyRepository<UserAccount> userAccountRoRepo,
-        IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
-        IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo,
-        IInvoiceDataService invoiceDataService) : base(logger)
+        IReadOnlyRepository<InvoiceData> invoiceDataRoRepo,
+        IWriteOnlyRepository<InvoiceData> invoiceDataWoRepo,
+         IReadOnlyRepository<UserAccount> userAccountRoRepo,
+         IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
+         IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo
+        ) : base(logger)
     {
         _logger = logger;
         _paymentSessionCreator = paymentSessionCreator;
         _platformSettingsService = platformSettingsService;
         _paymentDbLoggerService = paymentDbLoggerService;
+        _invoiceDataRoRepo = invoiceDataRoRepo;
+        _invoiceDataWoRepo = invoiceDataWoRepo;
         _webhookSecret = platformSettingsService.GetSetting("StripeWebhookKey");
-        _companyRoRepo = companyRoRepo;
         _userAccountRoRepo = userAccountRoRepo;
         _applySubscriptionPlanToCompanyService = applySubscriptionPlanToCompanyService;
         _platformSubscriptionPlanRoRepo = platformSubscriptionPlanRoRepo;
-        _invoiceDataService = invoiceDataService;
     }
 
     [HttpPost]
@@ -59,7 +61,6 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         _logger.LogDebug("parse event finished");
         _paymentDbLoggerService.Log(new PaymentOperatorLog() { Event = stripeEvent.Type, Received = DateTime.Now, Operator = "Stripe webhook", JsonEvent = json });
         
-        
         if (stripeEvent.Type == "checkout.session.completed")
         {
             _logger.LogDebug("Event checkout sesion completed");
@@ -68,13 +69,8 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId));
             _logger.LogDebug("Closing successfulPayment - done.");
         }
-        else if (stripeEvent.Type == "charge.succeeded")
-        {
-            _logger.LogDebug("Event charge.succeeded");
-            var charge = stripeEvent.Data.Object as Charge;
-            await HandleChargeSucceeded(charge);
-        }
-        else if (stripeEvent.Type == "customer.subscription.updated")
+        
+         if (stripeEvent.Type == "customer.subscription.updated")
         {
             _logger.LogDebug("Event customer.subscription.updated");
             var subscription = stripeEvent.Data.Object as Subscription;
@@ -83,28 +79,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
 
         return Ok();
     }
-
-    private async Task HandleChargeSucceeded(Charge charge)
-    {
-        try
-        {
-            _logger.LogInformation($"Processing charge.succeeded for charge {charge.Id}");
-            
-            var customerEmail = charge.BillingDetails?.Email;
-            if (string.IsNullOrEmpty(customerEmail))
-            {
-                _logger.LogWarning($"No billing email found in charge {charge.Id}");
-                return;
-            }
-
-            await ProcessSubscriptionRenewal(customerEmail, charge.Id);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Error processing charge.succeeded for charge {charge.Id}");
-        }
-    }
-
+    
     private async Task HandleSubscriptionUpdated(Subscription subscription)
     {
         try
@@ -112,7 +87,11 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             _logger.LogInformation($"Processing customer.subscription.updated for subscription {subscription.Id}");
             
             var customerService = new CustomerService();
-            var customer = await customerService.GetAsync(subscription.CustomerId);
+            var customer = await new CustomerService().GetAsync(
+                subscription.CustomerId,
+                options: null,
+                requestOptions: new RequestOptions { ApiKey = _platformSettingsService.GetSetting("StripeSecretKey") }
+            );
             
             if (customer == null || string.IsNullOrEmpty(customer.Email))
             {
@@ -134,59 +113,49 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         {
             _logger.LogInformation($"Processing subscription renewal for email: {customerEmail}");
 
-            var userAccount = _userAccountRoRepo.GetData(x => x.Email == customerEmail).FirstOrDefault();
-            if (userAccount == null)
+            var user = _userAccountRoRepo.GetData(x => x.Email == customerEmail, x => x.LastUsedCompany).FirstOrDefault();
+            if (user == null)
             {
                 _logger.LogWarning($"User not found for email: {customerEmail}");
                 return;
             }
             
-            var company = _companyRoRepo.GetData(x => x.OwnerGuid == userAccount.Guid, 
-                x => x.CompanyPlatformSubscription, 
-                x => x.CompanyPlatformSubscription.SubscriptionPlan).FirstOrDefault();
-            
-            if (company == null)
+            if (user.LastUsedCompany.CompanyPlatformSubscription?.SubscriptionPlanGuid == null)
             {
-                _logger.LogWarning($"Company not found for user: {customerEmail}");
-                return;
-            }
-
-            if (company.CompanyPlatformSubscription?.SubscriptionPlanGuid == null)
-            {
-                _logger.LogWarning($"No active subscription plan for company: {company.CompanyName}");
+                _logger.LogWarning($"No active subscription plan for company: {user.LastUsedCompany.CompanyName}");
                 return;
             }
             
-            var subscriptionPlan = _platformSubscriptionPlanRoRepo.GetFirst(x => x.Guid == company.CompanyPlatformSubscription.SubscriptionPlanGuid);
+            var subscriptionPlan = _platformSubscriptionPlanRoRepo.GetFirst(x => x.Guid == user.LastUsedCompany.CompanyPlatformSubscription.SubscriptionPlanGuid);
             if (subscriptionPlan == null)
             {
-                _logger.LogWarning($"Subscription plan not found for company: {company.CompanyName}");
+                _logger.LogWarning($"Subscription plan not found for company: {user.LastUsedCompany.CompanyName}");
                 return;
             }
 
-            _logger.LogInformation($"Extending subscription for company: {company.CompanyName}, plan: {subscriptionPlan.PlanName}");
+            _logger.LogInformation($"Extending subscription for company: {user.LastUsedCompany.CompanyName}, plan: {subscriptionPlan.PlanName}");
             
-            _applySubscriptionPlanToCompanyService.Apply(subscriptionPlan, company.Guid);
+            _applySubscriptionPlanToCompanyService.Apply(subscriptionPlan, user.LastUsedCompany.Guid);
             
-            var existingInvoiceData = _invoiceDataService.Get(company.Guid);
+            var existingInvoiceData = _invoiceDataRoRepo.GetData(x => x.InvoiceEmail == user.Email).FirstOrDefault();
             
-            var invoiceDataIm = new InvoiceDataIm
+            var result = _invoiceDataWoRepo.InsertData(new InvoiceData()
             {
-                CompanyGuid = company.Guid,
-                City = existingInvoiceData?.City ?? "",
-                Country = existingInvoiceData?.Country ?? "",
-                CompanyName = existingInvoiceData?.CompanyName ?? company.CompanyName,
-                InvoiceEmail = existingInvoiceData?.InvoiceEmail ?? "",
-                NIP = existingInvoiceData?.NIP ?? "",
-                PostCode = existingInvoiceData?.PostCode ?? "",
-                Street = existingInvoiceData?.Street ?? "",
+                City = existingInvoiceData.City == null ? "" : existingInvoiceData.City,
+                CompanyGuid = existingInvoiceData.CompanyGuid,
+                Country = existingInvoiceData.Country == null ? "" : existingInvoiceData.Country,
+                CompanyName = existingInvoiceData.CompanyName == null ? "" : existingInvoiceData.CompanyName,
+                Created = DateTime.Now,
+                CreatedByGuid = user.Guid,
+                InvoiceEmail = existingInvoiceData.InvoiceEmail == null ? "" : existingInvoiceData.InvoiceEmail,
+                NIP = existingInvoiceData.NIP == null ? "" : existingInvoiceData.NIP,
+                PostCode = existingInvoiceData.PostCode == null ? "" : existingInvoiceData.PostCode,
+                Street = existingInvoiceData.Street == null ? "" : existingInvoiceData.Street,
                 SubscriptionPlanGuid = subscriptionPlan.Guid,
-                InvoiceRequested = existingInvoiceData?.InvoiceRequested ?? false
-            };
+                InvoiceRequested = existingInvoiceData.InvoiceRequested
+            });
 
-            _invoiceDataService.Create(invoiceDataIm);
-
-            _logger.LogInformation($"Successfully processed subscription renewal for company: {company.CompanyName}, Stripe event: {stripeEventId}");
+            _logger.LogInformation($"Successfully processed subscription renewal for company: {user.LastUsedCompany.CompanyName}, Stripe event: {stripeEventId}");
         }
         catch (Exception ex)
         {
@@ -198,7 +167,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     {
         try
         {
-            return EventUtility.ConstructEvent(json, stripeSignatureHeader, _webhookSecret);
+            return EventUtility.ConstructEvent(json, stripeSignatureHeader, _webhookSecret, tolerance: 300, throwOnApiVersionMismatch: false);
         }
         catch (StripeException e)
         {
@@ -207,7 +176,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
                 JsonEvent = json,
                 Operator = "Stripe webhook",
                 Received = DateTime.Now,
-                Event = $"Webhook error ! {e.Message}"
+                Event = $"Webhook error ! {e.Message}",
             });
             Response.StatusCode = 400;
             _logger.LogError(e, json);
