@@ -26,6 +26,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     private readonly IReadOnlyRepository<UserAccount> _userAccountRoRepo;
     private readonly IApplySubscriptionPlanToCompanyService _applySubscriptionPlanToCompanyService;
     private readonly IReadOnlyRepository<PlatformSubscriptionPlan> _platformSubscriptionPlanRoRepo;
+    private readonly IInvoiceDataService _invoiceDataService;
 
     public StripeWebhookController(
         ILogger<StripeWebhookController> logger,
@@ -36,7 +37,8 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         IWriteOnlyRepository<InvoiceData> invoiceDataWoRepo,
          IReadOnlyRepository<UserAccount> userAccountRoRepo,
          IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
-         IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo
+         IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo,
+        IInvoiceDataService invoiceDataService
         ) : base(logger)
     {
         _logger = logger;
@@ -49,6 +51,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         _userAccountRoRepo = userAccountRoRepo;
         _applySubscriptionPlanToCompanyService = applySubscriptionPlanToCompanyService;
         _platformSubscriptionPlanRoRepo = platformSubscriptionPlanRoRepo;
+        _invoiceDataService = invoiceDataService;
     }
 
     [HttpPost]
@@ -58,7 +61,6 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         _logger.LogDebug($"Received stripe webhook request");
         _logger.LogDebug($"json parsed : \n" + json +"\n\nParse event...");
         var stripeEvent = ParseEvent(json, Request.Headers["Stripe-Signature"]);
-        _logger.LogDebug("parse event finished");
         _paymentDbLoggerService.Log(new PaymentOperatorLog() { Event = stripeEvent.Type, Received = DateTime.Now, Operator = "Stripe webhook", JsonEvent = json });
         
         if (stripeEvent.Type == "checkout.session.completed")
@@ -86,7 +88,6 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         {
             _logger.LogInformation($"Processing customer.subscription.updated for subscription {subscription.Id}");
             
-            var customerService = new CustomerService();
             var customer = await new CustomerService().GetAsync(
                 subscription.CustomerId,
                 options: null,
@@ -139,21 +140,21 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             
             var existingInvoiceData = _invoiceDataRoRepo.GetData(x => x.InvoiceEmail == user.Email).FirstOrDefault();
             
-            var result = _invoiceDataWoRepo.InsertData(new InvoiceData()
+            var newInvoiceData = new InvoiceDataIm()
             {
                 City = existingInvoiceData.City == null ? "" : existingInvoiceData.City,
                 CompanyGuid = existingInvoiceData.CompanyGuid,
                 Country = existingInvoiceData.Country == null ? "" : existingInvoiceData.Country,
                 CompanyName = existingInvoiceData.CompanyName == null ? "" : existingInvoiceData.CompanyName,
-                Created = DateTime.Now,
-                CreatedByGuid = user.Guid,
                 InvoiceEmail = existingInvoiceData.InvoiceEmail == null ? "" : existingInvoiceData.InvoiceEmail,
                 NIP = existingInvoiceData.NIP == null ? "" : existingInvoiceData.NIP,
                 PostCode = existingInvoiceData.PostCode == null ? "" : existingInvoiceData.PostCode,
                 Street = existingInvoiceData.Street == null ? "" : existingInvoiceData.Street,
                 SubscriptionPlanGuid = subscriptionPlan.Guid,
                 InvoiceRequested = existingInvoiceData.InvoiceRequested
-            });
+            };
+
+            _invoiceDataService.Create(newInvoiceData, false);
 
             _logger.LogInformation($"Successfully processed subscription renewal for company: {user.LastUsedCompany.CompanyName}, Stripe event: {stripeEventId}");
         }
