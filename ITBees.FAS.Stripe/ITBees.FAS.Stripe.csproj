@@ -13,7 +13,7 @@
         <PackageReference Include="ITBees.Interfaces" Version="8.0.62" />
         <PackageReference Include="ITBees.Models" Version="8.0.85" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-        <PackageReference Include="Stripe.net" Version="47.4.0" />
+        <PackageReference Include="Stripe.net" Version="48.5.0" />
     </ItemGroup>
 
     <ItemGroup>
