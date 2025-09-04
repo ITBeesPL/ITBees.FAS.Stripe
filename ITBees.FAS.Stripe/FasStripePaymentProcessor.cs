@@ -17,16 +17,44 @@ namespace ITBees.FAS.Stripe
             StripeConfiguration.ApiKey = StripeSettings.SecretKey;
         }
 
-        public FasActivePaymentSession CreatePaymentSession(FasPayment fasPayment, bool oneTimePayment, string successUrl = "", string failUrl = "")
+        public FasActivePaymentSession CreatePaymentSession(FasPayment fasPayment, bool oneTimePayment,
+            string successUrl = "", string failUrl = "")
         {
-            var successUrlSetting = string.IsNullOrEmpty(successUrl) ? _platformSettingsService.GetSetting("PaymentSuccessUrl") : successUrl;
-            var failUrlSetting = string.IsNullOrEmpty(failUrl) ? _platformSettingsService.GetSetting("PaymentCancelUrl") : failUrl;
+            var successUrlSetting = string.IsNullOrEmpty(successUrl)
+                ? _platformSettingsService.GetSetting("PaymentSuccessUrl")
+                : successUrl;
+            var failUrlSetting = string.IsNullOrEmpty(failUrl)
+                ? _platformSettingsService.GetSetting("PaymentCancelUrl")
+                : failUrl;
+
             var options = new SessionCreateOptions()
             {
                 SuccessUrl = $"{successUrlSetting}?guid={fasPayment.PaymentSessionGuid}",
                 CancelUrl = $"{failUrlSetting}?guid={fasPayment.PaymentSessionGuid}",
                 LineItems = new List<SessionLineItemOptions>(),
                 Mode = oneTimePayment ? "payment" : "subscription",
+
+                // Ensure a Customer object is created so you always have a stable cus_... id
+                CustomerCreation = oneTimePayment ? null : "always",
+
+                // Seed metadata at Checkout time so that future webhooks can resolve without DB/email
+                // TODO: fill these values from your domain (if available at this layer)
+                SubscriptionData = oneTimePayment
+                    ? null
+                    : new SessionSubscriptionDataOptions
+                    {
+                        Metadata = new Dictionary<string, string>
+                        {
+                            // e.g.: { "companyGuid", myCompanyGuid.ToString() },
+                            // e.g.: { "subscriptionPlanGuid", myPlanGuid.ToString() }
+                        }
+                    },
+
+                // Optional: useful for debugging cross-references
+                Metadata = new Dictionary<string, string>
+                {
+                    { "paymentSessionGuid", fasPayment.PaymentSessionGuid.ToString() }
+                }
             };
 
             foreach (var product in fasPayment.Products)
@@ -61,11 +89,10 @@ namespace ITBees.FAS.Stripe
             var service = new SessionService();
             options.ClientReferenceId = fasPayment.PaymentSessionGuid.ToString();
             options.CustomerEmail = fasPayment.CustomerEmail;
-            Session session = service.Create(options);
+            var session = service.Create(options);
 
             return new FasActivePaymentSession(session.Url, session.Id);
         }
-
 
         private Interval GetStripeInterval(FasBillingPeriod productBillingPeriod)
         {
@@ -128,7 +155,8 @@ namespace ITBees.FAS.Stripe
 
                 if (sessions != null && sessions.Data != null && sessions.Data.Count > 0)
                 {
-                    var session = sessions.Data.FirstOrDefault(s => s.ClientReferenceId == paymentSessionGuid.ToString());
+                    var session =
+                        sessions.Data.FirstOrDefault(s => s.ClientReferenceId == paymentSessionGuid.ToString());
                     if (session != null)
                     {
                         return session.PaymentStatus == "paid";

@@ -27,6 +27,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     private readonly IApplySubscriptionPlanToCompanyService _applySubscriptionPlanToCompanyService;
     private readonly IReadOnlyRepository<PlatformSubscriptionPlan> _platformSubscriptionPlanRoRepo;
     private readonly IInvoiceDataService _invoiceDataService;
+    private readonly IFasPaymentProcessor _paymentProcessor;
 
     public StripeWebhookController(
         ILogger<StripeWebhookController> logger,
@@ -35,11 +36,12 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         IPaymentDbLoggerService paymentDbLoggerService,
         IReadOnlyRepository<InvoiceData> invoiceDataRoRepo,
         IWriteOnlyRepository<InvoiceData> invoiceDataWoRepo,
-         IReadOnlyRepository<UserAccount> userAccountRoRepo,
-         IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
-         IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo,
-        IInvoiceDataService invoiceDataService
-        ) : base(logger)
+        IReadOnlyRepository<UserAccount> userAccountRoRepo,
+        IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
+        IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo,
+        IInvoiceDataService invoiceDataService,
+        IFasPaymentProcessor paymentProcessor
+    ) : base(logger)
     {
         _logger = logger;
         _paymentSessionCreator = paymentSessionCreator;
@@ -52,6 +54,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         _applySubscriptionPlanToCompanyService = applySubscriptionPlanToCompanyService;
         _platformSubscriptionPlanRoRepo = platformSubscriptionPlanRoRepo;
         _invoiceDataService = invoiceDataService;
+        _paymentProcessor = paymentProcessor;
     }
 
     [HttpPost]
@@ -59,108 +62,156 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     {
         var json = await new StreamReader(HttpContext.Request.Body).ReadToEndAsync();
         _logger.LogDebug($"Received stripe webhook request");
-        _logger.LogDebug($"json parsed : \n" + json +"\n\nParse event...");
+        _logger.LogDebug($"json parsed : \n" + json + "\n\nParse event...");
         var stripeEvent = ParseEvent(json, Request.Headers["Stripe-Signature"]);
-        _paymentDbLoggerService.Log(new PaymentOperatorLog() { Event = stripeEvent.Type, Received = DateTime.Now, Operator = "Stripe webhook", JsonEvent = json });
-        
+        _paymentDbLoggerService.Log(new PaymentOperatorLog()
+            { Event = stripeEvent.Type, Received = DateTime.Now, Operator = "Stripe webhook", JsonEvent = json });
+
         if (stripeEvent.Type == "checkout.session.completed")
         {
-            _logger.LogDebug("Event checkout sesion completed");
+            _logger.LogDebug("Event checkout.session.completed");
             var session = stripeEvent.Data.Object as Session;
+
             _logger.LogDebug("Closing successfulPayment...");
-            _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId));
+            _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId),
+                session.SubscriptionId);
             _logger.LogDebug("Closing successfulPayment - done.");
+            return Ok();
+        }
+
+        if (stripeEvent.Type == "invoice.payment_succeeded")
+        {
+            _logger.LogDebug("Event invoice.payment_succeeded");
+            var invoice = stripeEvent.Data.Object as Invoice;
+            if (invoice.BillingReason == "subscription_create")
+            {
+                _logger.LogDebug("Skipping invoice.payment_succeeded for first subscription_create event.");
+                return Ok();
+            }
+
+            var invoiceData =
+                await ApplySubscriptionPlanAndCreateInvoiceForRenewal(invoice.CustomerEmail, invoice.SubscriptionId);
+            _logger.LogDebug("Creating payment session for subscription renewal...");
+            var paymentSessionFromSubscriptionRenew = _paymentSessionCreator.CreatePaymentSessionFromSubscriptionRenew(
+                invoice.Created, null,
+                _paymentProcessor, invoiceData.Guid, _paymentProcessor.ProcessorName, null, invoice.SubscriptionId,
+                invoiceData.InvoiceRequested);
+            _logger.LogDebug("Creating payment session for subscription renewal - new paymentSession guid : {paymentSessionFromSubscriptionRenew.Guid}");
         }
         
-         if (stripeEvent.Type == "customer.subscription.updated")
+        if (stripeEvent.Type == "charge.refunded" || 
+            stripeEvent.Type == "charge.refund.updated" || 
+            stripeEvent.Type.StartsWith("refund.", StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogDebug("Event customer.subscription.updated");
-            var subscription = stripeEvent.Data.Object as Subscription;
-            await HandleSubscriptionUpdated(subscription);
+            _logger.LogDebug($"Event {stripeEvent.Type}");
+                
+            // Handle both payload shapes gracefully
+            if (stripeEvent.Data.Object is Refund refundObj)
+            {
+                await HandleRefundAsync(refundObj);
+            }
+            else if (stripeEvent.Data.Object is Charge chargeObj)
+            {
+                await HandleChargeRefundedAsync(chargeObj);
+            }
+            else
+            {
+                _logger.LogWarning("Refund event payload type not recognized: {Type}", stripeEvent.Data.Object?.GetType().FullName);
+            }
+
+            return Ok();
         }
 
         return Ok();
     }
-    
-    private async Task HandleSubscriptionUpdated(Subscription subscription)
-    {
-        try
-        {
-            _logger.LogInformation($"Processing customer.subscription.updated for subscription {subscription.Id}");
-            
-            var customer = await new CustomerService().GetAsync(
-                subscription.CustomerId,
-                options: null,
-                requestOptions: new RequestOptions { ApiKey = _platformSettingsService.GetSetting("StripeSecretKey") }
-            );
-            
-            if (customer == null || string.IsNullOrEmpty(customer.Email))
-            {
-                _logger.LogWarning($"No customer email found for subscription {subscription.Id}");
-                return;
-            }
 
-            await ProcessSubscriptionRenewal(customer.Email, subscription.Id);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Error processing customer.subscription.updated for subscription {subscription.Id}");
-        }
+    private RequestOptions CreateStripeRequestOptions()
+    {
+        return new RequestOptions { ApiKey = _platformSettingsService.GetSetting("StripeSecretKey") };
     }
 
-    private async Task ProcessSubscriptionRenewal(string customerEmail, string stripeEventId)
+    private async Task<InvoiceDataVm> ApplySubscriptionPlanAndCreateInvoiceForRenewal(string customerEmail,
+        string? stripeSubscriptionId = null)
     {
         try
         {
-            _logger.LogInformation($"Processing subscription renewal for email: {customerEmail}");
+            Company? company = null;
+            PlatformSubscriptionPlan? platformSubscriptionPlan = null;
+            company =
+                _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(stripeSubscriptionId);
+            if (company == null)
+            {
+                _logger.LogInformation($"Processing subscription renewal for email: {customerEmail}");
 
-            var user = _userAccountRoRepo.GetData(x => x.Email == customerEmail, x => x.LastUsedCompany).FirstOrDefault();
-            if (user == null)
-            {
-                _logger.LogWarning($"User not found for email: {customerEmail}");
-                return;
+                var user = _userAccountRoRepo.GetData(x => x.Email == customerEmail, x => x.LastUsedCompany)
+                    .FirstOrDefault();
+                if (user == null)
+                {
+                    _logger.LogError($"User not found for email: {customerEmail}");
+                    throw new Exception($"User not found for email: {customerEmail}");
+                }
+
+                if (user.LastUsedCompany.CompanyPlatformSubscription?.SubscriptionPlanGuid == null)
+                {
+                    _logger.LogError($"No active subscription plan for company: {user.LastUsedCompany.CompanyName}");
+                    throw new Exception("No active subscription plan for company: " + user.LastUsedCompany.CompanyName);
+                }
+
+                company = user.LastUsedCompany;
+
+                platformSubscriptionPlan = _platformSubscriptionPlanRoRepo.GetFirst(x =>
+                    x.Guid == user.LastUsedCompany.CompanyPlatformSubscription.SubscriptionPlanGuid);
             }
-            
-            if (user.LastUsedCompany.CompanyPlatformSubscription?.SubscriptionPlanGuid == null)
+            else
             {
-                _logger.LogWarning($"No active subscription plan for company: {user.LastUsedCompany.CompanyName}");
-                return;
-            }
-            
-            var subscriptionPlan = _platformSubscriptionPlanRoRepo.GetFirst(x => x.Guid == user.LastUsedCompany.CompanyPlatformSubscription.SubscriptionPlanGuid);
-            if (subscriptionPlan == null)
-            {
-                _logger.LogWarning($"Subscription plan not found for company: {user.LastUsedCompany.CompanyName}");
-                return;
+                platformSubscriptionPlan = company.CompanyPlatformSubscription.SubscriptionPlan;
             }
 
-            _logger.LogInformation($"Extending subscription for company: {user.LastUsedCompany.CompanyName}, plan: {subscriptionPlan.PlanName}");
-            
-            _applySubscriptionPlanToCompanyService.Apply(subscriptionPlan, user.LastUsedCompany.Guid);
-            
-            var existingInvoiceData = _invoiceDataRoRepo.GetData(x => x.InvoiceEmail == user.Email).FirstOrDefault();
-            
+            if (company == null)
+            {
+                _logger.LogError($"Subscription plan not found for company: {customerEmail}");
+                throw new Exception($"Subscription plan not found for company: {customerEmail}");
+            }
+
+            _logger.LogInformation(
+                $"Extending subscription for client: {customerEmail}, plan: {platformSubscriptionPlan.PlanName}");
+
+            _applySubscriptionPlanToCompanyService.Apply(platformSubscriptionPlan, company.Guid);
+
+            var existingInvoiceData = _invoiceDataRoRepo.GetData(x => x.CompanyGuid == company.Guid)
+                .OrderByDescending(x => x.Created).FirstOrDefault();
+            if (existingInvoiceData == null)
+            {
+                _logger.LogError("No invoice data found for user: {Email}, cannot create new invoice data." +
+                                 customerEmail);
+                throw new Exception("No invoice data found for user: " + customerEmail);
+            }
+
             var newInvoiceData = new InvoiceDataIm()
             {
                 City = existingInvoiceData.City == null ? "" : existingInvoiceData.City,
-                CompanyGuid = existingInvoiceData.CompanyGuid,
+                CompanyGuid = company.Guid,
                 Country = existingInvoiceData.Country == null ? "" : existingInvoiceData.Country,
                 CompanyName = existingInvoiceData.CompanyName == null ? "" : existingInvoiceData.CompanyName,
                 InvoiceEmail = existingInvoiceData.InvoiceEmail == null ? "" : existingInvoiceData.InvoiceEmail,
                 NIP = existingInvoiceData.NIP == null ? "" : existingInvoiceData.NIP,
                 PostCode = existingInvoiceData.PostCode == null ? "" : existingInvoiceData.PostCode,
                 Street = existingInvoiceData.Street == null ? "" : existingInvoiceData.Street,
-                SubscriptionPlanGuid = subscriptionPlan.Guid,
+                SubscriptionPlanGuid = platformSubscriptionPlan.Guid,
                 InvoiceRequested = existingInvoiceData.InvoiceRequested
             };
 
-            _invoiceDataService.Create(newInvoiceData, false);
+            var invoiceData = _invoiceDataService.Create(newInvoiceData, false);
 
-            _logger.LogInformation($"Successfully processed subscription renewal for company: {user.LastUsedCompany.CompanyName}, Stripe event: {stripeEventId}");
+            _logger.LogInformation(
+                $"Successfully processed subscription renewal for company: {company.CompanyName}, Stripe subscription id : {stripeSubscriptionId}");
+            return invoiceData;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, $"Error in ProcessSubscriptionRenewal for email: {customerEmail}, Stripe event: {stripeEventId}");
+            _logger.LogError(ex,
+                $"Error in ApplySubscriptionPlanAndCreateInvoiceForRenewal for email: {customerEmail}, Stripe subscription id : {stripeSubscriptionId}");
+            throw;
         }
     }
 
@@ -168,7 +219,8 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     {
         try
         {
-            return EventUtility.ConstructEvent(json, stripeSignatureHeader, _webhookSecret, tolerance: 300, throwOnApiVersionMismatch: false);
+            return EventUtility.ConstructEvent(json, stripeSignatureHeader, _webhookSecret, tolerance: 300,
+                throwOnApiVersionMismatch: false);
         }
         catch (StripeException e)
         {
@@ -183,6 +235,152 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             _logger.LogError(e, json);
             throw new Exception("Webhook verification failed", e);
         }
+        catch (Exception e)
+        {
+            _paymentDbLoggerService.Log(new PaymentOperatorLog()
+            {
+                JsonEvent = json,
+                Operator = "Stripe webhook",
+                Received = DateTime.Now,
+                Event = $"Webhook error ! {e.Message}",
+            });
+            Response.StatusCode = 400;
+            _logger.LogError(e, json);
+            throw new Exception("Webhook failed", e);
+        }
     }
+    
+    private async Task HandleRefundAsync(Refund refund)
+        {
+            try
+            {
+                // Gather as much correlation info as possible
+                var req = CreateStripeRequestOptions();
+                Charge charge = null;
+                PaymentIntent pi = null;
+                Invoice invoice = null;
+                Subscription subscription = null;
+                Customer customer = null;
 
+                // Try to get Charge
+                if (!string.IsNullOrEmpty(refund.ChargeId))
+                    charge = await new ChargeService().GetAsync(refund.ChargeId, options: null, requestOptions: req);
+
+                // Try to get PaymentIntent
+                var paymentIntentId = refund.PaymentIntentId ?? charge?.PaymentIntentId;
+                if (!string.IsNullOrEmpty(paymentIntentId))
+                    pi = await new PaymentIntentService().GetAsync(paymentIntentId, options: null, requestOptions: req);
+
+                // Try to get Invoice (via PI)
+                if (!string.IsNullOrEmpty(pi?.InvoiceId))
+                    invoice = await new InvoiceService().GetAsync(pi.InvoiceId, options: null, requestOptions: req);
+
+                // Try to get Subscription (via Invoice)
+                if (!string.IsNullOrEmpty(invoice?.SubscriptionId))
+                    subscription = await new SubscriptionService().GetAsync(invoice.SubscriptionId, options: null, requestOptions: req);
+
+                // Try to get Customer (prefer PI.CustomerId; fallback to charge.CustomerId)
+                var customerId = pi?.CustomerId ?? charge?.CustomerId;
+                if (!string.IsNullOrEmpty(customerId))
+                    customer = await new CustomerService().GetAsync(customerId, options: null, requestOptions: req);
+
+                // Determine full vs partial refund
+                var refundAmount = refund.Amount; // minor units
+                var currency = refund.Currency;
+                bool isFull = false;
+                if (charge != null)
+                {
+                    var captured = charge.AmountCaptured > 0 ? charge.AmountCaptured : charge.Amount;
+                    isFull = charge.AmountRefunded >= captured;
+                }
+
+                Company company = null;
+                if (!string.IsNullOrEmpty(subscription?.Id))
+                {
+                    company = _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(subscription.Id);
+                }
+                if (company == null && !string.IsNullOrEmpty(customer?.Email))
+                {
+                    var user = _userAccountRoRepo.GetData(x => x.Email == customer.Email, x => x.LastUsedCompany).FirstOrDefault();
+                    if (user != null) company = user.LastUsedCompany;
+                }
+
+                _paymentDbLoggerService.Log(new PaymentOperatorLog
+                {
+                    Operator = "Stripe webhook",
+                    Received = DateTime.Now,
+                    Event = $"Refund {(isFull ? "FULL" : "PARTIAL")} {refundAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
+                    JsonEvent = $"refund_id={refund.Id}"
+                });
+
+                // TODO: Your domain action:
+                // - mark payment session as refunded (full/partial)
+                // - revoke or adjust access if full refund (business decision)
+                // - optionally create a credit note / negative entry in your accounting
+                
+                if (company != null && isFull)
+                    _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+
+                _logger.LogInformation("Handled refund: refund={RefundId}, isFull={IsFull}, company={CompanyGuid}", refund.Id, isFull, company?.Guid);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error while handling refund (refund object).");
+            }
+        }
+
+        private async Task HandleChargeRefundedAsync(Charge charge)
+        {
+            try
+            {
+                var req = CreateStripeRequestOptions();
+                PaymentIntent pi = null;
+                Invoice invoice = null;
+                Subscription subscription = null;
+                Customer customer = null;
+
+                if (!string.IsNullOrEmpty(charge.PaymentIntentId))
+                    pi = await new PaymentIntentService().GetAsync(charge.PaymentIntentId, options: null, requestOptions: req);
+                if (!string.IsNullOrEmpty(pi?.InvoiceId))
+                    invoice = await new InvoiceService().GetAsync(pi.InvoiceId, options: null, requestOptions: req);
+                if (!string.IsNullOrEmpty(invoice?.SubscriptionId))
+                    subscription = await new SubscriptionService().GetAsync(invoice.SubscriptionId, options: null, requestOptions: req);
+                if (!string.IsNullOrEmpty(charge.CustomerId))
+                    customer = await new CustomerService().GetAsync(charge.CustomerId, options: null, requestOptions: req);
+
+                // Charge provides refunded amount directly
+                var refundedAmount = charge.AmountRefunded;
+                var currency = charge.Currency;
+                var captured = charge.AmountCaptured > 0 ? charge.AmountCaptured : charge.Amount;
+                var isFull = refundedAmount >= captured;
+
+                Company company = null;
+                if (!string.IsNullOrEmpty(subscription?.Id))
+                {
+                    company = _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(subscription.Id);
+                }
+                if (company == null && !string.IsNullOrEmpty(customer?.Email))
+                {
+                    var user = _userAccountRoRepo.GetData(x => x.Email == customer.Email, x => x.LastUsedCompany).FirstOrDefault();
+                    if (user != null) company = user.LastUsedCompany;
+                }
+
+                _paymentDbLoggerService.Log(new PaymentOperatorLog
+                {
+                    Operator = "Stripe webhook",
+                    Received = DateTime.Now,
+                    Event = $"Charge refunded {(isFull ? "FULL" : "PARTIAL")} {refundedAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
+                    JsonEvent = $"charge_id={charge.Id}"
+                });
+
+                if (company != null && isFull) 
+                    _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+
+                _logger.LogInformation("Handled charge.refunded: charge={ChargeId}, isFull={IsFull}, company={CompanyGuid}", charge.Id, isFull, company?.Guid);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error while handling charge.refunded.");
+            }
+        }
 }
