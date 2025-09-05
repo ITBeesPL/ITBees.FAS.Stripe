@@ -68,7 +68,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
 
             _logger.LogDebug("Closing successfulPayment...");
             _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId), session.Created,
-                session.SubscriptionId);
+                session.SubscriptionId, stripeEvent.Id);
             _logger.LogDebug("Closing successfulPayment - done.");
             return Ok();
         }
@@ -86,10 +86,11 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             var invoiceData =
                 await ApplySubscriptionPlanAndCreateInvoiceForRenewal(invoice.CustomerEmail, invoice.Created,
                     invoice.SubscriptionId);
+            var stripeEventId = stripeEvent.Id;
             _logger.LogDebug("Creating payment session for subscription renewal...");
             var paymentSessionFromSubscriptionRenew = _paymentSessionCreator.CreatePaymentSessionFromSubscriptionRenew(
-                invoice.Created, null,
-                _paymentProcessor, invoiceData.Guid, _paymentProcessor.ProcessorName, null, invoice.SubscriptionId,
+                invoice.Created, invoiceData.CreatedByGuid,
+                _paymentProcessor, invoiceData.Guid, _paymentProcessor.ProcessorName, stripeEventId,null, invoice.SubscriptionId,
                 invoiceData.InvoiceRequested);
             _logger.LogDebug(
                 "Creating payment session for subscription renewal - new paymentSession guid : {paymentSessionFromSubscriptionRenew.Guid}");
@@ -133,7 +134,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     {
         try
         {
-            Company? company = null;
+             Company? company = null;
             PlatformSubscriptionPlan? platformSubscriptionPlan = null;
             company =
                 _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(stripeSubscriptionId);
