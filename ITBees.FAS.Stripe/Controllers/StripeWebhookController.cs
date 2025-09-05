@@ -94,7 +94,7 @@ namespace ITBees.FAS.Stripe.Controllers
                     return Ok();
                 }
 
-                var stripeSubscriptionId = invoice.Parent?.SubscriptionDetails?.Subscription.Id;
+                var stripeSubscriptionId = invoice.Parent?.SubscriptionDetails?.SubscriptionId;
 
                 var invoiceData = await ApplySubscriptionPlanAndCreateInvoiceForRenewal(
                     invoice.CustomerEmail,
@@ -294,7 +294,7 @@ namespace ITBees.FAS.Stripe.Controllers
                 if (!string.IsNullOrEmpty(pi?.Id))
                 {
                     invoice = await TryFindInvoiceByPaymentIntentAsync(pi.Id, req);
-                    subscriptionId = invoice?.Parent?.SubscriptionDetails?.Subscription.Id;
+                    subscriptionId = invoice?.Parent?.SubscriptionDetails?.SubscriptionId;
                 }
 
                 // Try to get Customer (prefer PI.CustomerId; fallback to charge.CustomerId)
@@ -380,7 +380,7 @@ namespace ITBees.FAS.Stripe.Controllers
                 if (!string.IsNullOrEmpty(pi?.Id))
                 {
                     invoice = await TryFindInvoiceByPaymentIntentAsync(pi.Id, req);
-                    subscriptionId = invoice?.Parent?.SubscriptionDetails?.Subscription.Id;
+                    subscriptionId = invoice?.Parent?.SubscriptionDetails?.SubscriptionId;
                 }
 
                 if (!string.IsNullOrEmpty(charge.CustomerId))
