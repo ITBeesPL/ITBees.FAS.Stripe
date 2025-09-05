@@ -22,10 +22,10 @@
         <Folder Include="Models\" />
     </ItemGroup>
 
-    <!--    <ItemGroup>-->
-    <!--        <ProjectReference Include="..\..\ITBees.FAS.Payments\ITBees.FAS.Payments\ITBees.FAS.Payments.csproj"/>-->
-    <!--        <PackageReference Include="Newtonsoft.Json" Version="13.0.3"/>-->
-    <!--        <PackageReference Include="Stripe.net" Version="47.0.0"/>-->
-    <!--    </ItemGroup>-->
+<!--        <ItemGroup>-->
+<!--            <ProjectReference Include="..\..\ITBees.FAS.Payments\ITBees.FAS.Payments\ITBees.FAS.Payments.csproj"/>-->
+<!--            <PackageReference Include="Newtonsoft.Json" Version="13.0.3"/>-->
+<!--            <PackageReference Include="Stripe.net" Version="48.5.0"/>-->
+<!--        </ItemGroup>-->
 
 </Project>
