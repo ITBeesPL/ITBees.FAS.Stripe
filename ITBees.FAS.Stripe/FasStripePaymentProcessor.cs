@@ -35,7 +35,7 @@ namespace ITBees.FAS.Stripe
                 Mode = oneTimePayment ? "payment" : "subscription",
 
                 // Ensure a Customer object is created so you always have a stable cus_... id
-                CustomerCreation = oneTimePayment ? null : "always",
+                CustomerCreation = oneTimePayment ? "always" : null,
 
                 // Seed metadata at Checkout time so that future webhooks can resolve without DB/email
                 // TODO: fill these values from your domain (if available at this layer)
