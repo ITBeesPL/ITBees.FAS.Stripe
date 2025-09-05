@@ -67,7 +67,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             var session = stripeEvent.Data.Object as Session;
 
             _logger.LogDebug("Closing successfulPayment...");
-            _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId),
+            _paymentSessionCreator.CloseSuccessfulPayment(Guid.Parse(session.ClientReferenceId), session.Created,
                 session.SubscriptionId);
             _logger.LogDebug("Closing successfulPayment - done.");
             return Ok();
@@ -84,21 +84,23 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             }
 
             var invoiceData =
-                await ApplySubscriptionPlanAndCreateInvoiceForRenewal(invoice.CustomerEmail, invoice.SubscriptionId);
+                await ApplySubscriptionPlanAndCreateInvoiceForRenewal(invoice.CustomerEmail, invoice.Created,
+                    invoice.SubscriptionId);
             _logger.LogDebug("Creating payment session for subscription renewal...");
             var paymentSessionFromSubscriptionRenew = _paymentSessionCreator.CreatePaymentSessionFromSubscriptionRenew(
                 invoice.Created, null,
                 _paymentProcessor, invoiceData.Guid, _paymentProcessor.ProcessorName, null, invoice.SubscriptionId,
                 invoiceData.InvoiceRequested);
-            _logger.LogDebug("Creating payment session for subscription renewal - new paymentSession guid : {paymentSessionFromSubscriptionRenew.Guid}");
+            _logger.LogDebug(
+                "Creating payment session for subscription renewal - new paymentSession guid : {paymentSessionFromSubscriptionRenew.Guid}");
         }
-        
-        if (stripeEvent.Type == "charge.refunded" || 
-            stripeEvent.Type == "charge.refund.updated" || 
+
+        if (stripeEvent.Type == "charge.refunded" ||
+            stripeEvent.Type == "charge.refund.updated" ||
             stripeEvent.Type.StartsWith("refund.", StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogDebug($"Event {stripeEvent.Type}");
-                
+
             // Handle both payload shapes gracefully
             if (stripeEvent.Data.Object is Refund refundObj)
             {
@@ -110,7 +112,8 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             }
             else
             {
-                _logger.LogWarning("Refund event payload type not recognized: {Type}", stripeEvent.Data.Object?.GetType().FullName);
+                _logger.LogWarning("Refund event payload type not recognized: {Type}",
+                    stripeEvent.Data.Object?.GetType().FullName);
             }
 
             return Ok();
@@ -125,6 +128,7 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     }
 
     private async Task<InvoiceDataVm> ApplySubscriptionPlanAndCreateInvoiceForRenewal(string customerEmail,
+        DateTime startingFrom,
         string? stripeSubscriptionId = null)
     {
         try
@@ -170,12 +174,13 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             _logger.LogInformation(
                 $"Extending subscription for client: {customerEmail}, plan: {platformSubscriptionPlan.PlanName}");
 
-            _applySubscriptionPlanToCompanyService.Apply(platformSubscriptionPlan, company.Guid);
+            _applySubscriptionPlanToCompanyService.Apply(platformSubscriptionPlan, company.Guid, startingFrom);
 
             var invoiceData = _invoiceDataService.CreateNewInvoiceBasedOnLastInvoice(company, platformSubscriptionPlan);
 
-            _logger.LogInformation($"Successfully processed subscription renewal for company: {company.CompanyName}, Stripe subscription id : {stripeSubscriptionId}");
-            
+            _logger.LogInformation(
+                $"Successfully processed subscription renewal for company: {company.CompanyName}, Stripe subscription id : {stripeSubscriptionId}");
+
             return invoiceData;
         }
         catch (Exception ex)
@@ -220,146 +225,162 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
             throw new Exception("Webhook failed", e);
         }
     }
-    
+
     private async Task HandleRefundAsync(Refund refund)
+    {
+        try
         {
-            try
+            // Gather as much correlation info as possible
+            var req = CreateStripeRequestOptions();
+            Charge charge = null;
+            PaymentIntent pi = null;
+            Invoice invoice = null;
+            Subscription subscription = null;
+            Customer customer = null;
+
+            // Try to get Charge
+            if (!string.IsNullOrEmpty(refund.ChargeId))
+                charge = await new ChargeService().GetAsync(refund.ChargeId, options: null, requestOptions: req);
+
+            // Try to get PaymentIntent
+            var paymentIntentId = refund.PaymentIntentId ?? charge?.PaymentIntentId;
+            if (!string.IsNullOrEmpty(paymentIntentId))
+                pi = await new PaymentIntentService().GetAsync(paymentIntentId, options: null, requestOptions: req);
+
+            // Try to get Invoice (via PI)
+            if (!string.IsNullOrEmpty(pi?.InvoiceId))
+                invoice = await new InvoiceService().GetAsync(pi.InvoiceId, options: null, requestOptions: req);
+
+            // Try to get Subscription (via Invoice)
+            if (!string.IsNullOrEmpty(invoice?.SubscriptionId))
+                subscription =
+                    await new SubscriptionService().GetAsync(invoice.SubscriptionId, options: null,
+                        requestOptions: req);
+
+            // Try to get Customer (prefer PI.CustomerId; fallback to charge.CustomerId)
+            var customerId = pi?.CustomerId ?? charge?.CustomerId;
+            if (!string.IsNullOrEmpty(customerId))
+                customer = await new CustomerService().GetAsync(customerId, options: null, requestOptions: req);
+
+            // Determine full vs partial refund
+            var refundAmount = refund.Amount; // minor units
+            var currency = refund.Currency;
+            bool isFull = false;
+            if (charge != null)
             {
-                // Gather as much correlation info as possible
-                var req = CreateStripeRequestOptions();
-                Charge charge = null;
-                PaymentIntent pi = null;
-                Invoice invoice = null;
-                Subscription subscription = null;
-                Customer customer = null;
-
-                // Try to get Charge
-                if (!string.IsNullOrEmpty(refund.ChargeId))
-                    charge = await new ChargeService().GetAsync(refund.ChargeId, options: null, requestOptions: req);
-
-                // Try to get PaymentIntent
-                var paymentIntentId = refund.PaymentIntentId ?? charge?.PaymentIntentId;
-                if (!string.IsNullOrEmpty(paymentIntentId))
-                    pi = await new PaymentIntentService().GetAsync(paymentIntentId, options: null, requestOptions: req);
-
-                // Try to get Invoice (via PI)
-                if (!string.IsNullOrEmpty(pi?.InvoiceId))
-                    invoice = await new InvoiceService().GetAsync(pi.InvoiceId, options: null, requestOptions: req);
-
-                // Try to get Subscription (via Invoice)
-                if (!string.IsNullOrEmpty(invoice?.SubscriptionId))
-                    subscription = await new SubscriptionService().GetAsync(invoice.SubscriptionId, options: null, requestOptions: req);
-
-                // Try to get Customer (prefer PI.CustomerId; fallback to charge.CustomerId)
-                var customerId = pi?.CustomerId ?? charge?.CustomerId;
-                if (!string.IsNullOrEmpty(customerId))
-                    customer = await new CustomerService().GetAsync(customerId, options: null, requestOptions: req);
-
-                // Determine full vs partial refund
-                var refundAmount = refund.Amount; // minor units
-                var currency = refund.Currency;
-                bool isFull = false;
-                if (charge != null)
-                {
-                    var captured = charge.AmountCaptured > 0 ? charge.AmountCaptured : charge.Amount;
-                    isFull = charge.AmountRefunded >= captured;
-                }
-
-                Company company = null;
-                if (!string.IsNullOrEmpty(subscription?.Id))
-                {
-                    company = _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(subscription.Id);
-                }
-                if (company == null && !string.IsNullOrEmpty(customer?.Email))
-                {
-                    var user = _userAccountRoRepo.GetData(x => x.Email == customer.Email, x => x.LastUsedCompany).FirstOrDefault();
-                    if (user != null) company = user.LastUsedCompany;
-                }
-
-                _paymentDbLoggerService.Log(new PaymentOperatorLog
-                {
-                    Operator = "Stripe webhook",
-                    Received = DateTime.Now,
-                    Event = $"Refund {(isFull ? "FULL" : "PARTIAL")} {refundAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
-                    JsonEvent = $"refund_id={refund.Id}"
-                });
-                
-                if (company != null && isFull)
-                {
-                    _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
-                    if (string.IsNullOrEmpty(subscription.Id))
-                    {
-                        _invoiceDataService.CreateCorrectiveInvoiceForRefundForLastPaymentSession(company.Guid);
-                    }
-                    else
-                    {
-                        _invoiceDataService.CreateCorrectiveInvoiceForRefund(company.Guid, refundAmount / 100.0m, subscription.Id);
-                    }
-                }
-
-                _logger.LogInformation("Handled refund: refund={RefundId}, isFull={IsFull}, company={CompanyGuid}", refund.Id, isFull, company?.Guid);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error while handling refund (refund object).");
-            }
-        }
-
-        private async Task HandleChargeRefundedAsync(Charge charge)
-        {
-            try
-            {
-                var req = CreateStripeRequestOptions();
-                PaymentIntent pi = null;
-                Invoice invoice = null;
-                Subscription subscription = null;
-                Customer customer = null;
-
-                if (!string.IsNullOrEmpty(charge.PaymentIntentId))
-                    pi = await new PaymentIntentService().GetAsync(charge.PaymentIntentId, options: null, requestOptions: req);
-                if (!string.IsNullOrEmpty(pi?.InvoiceId))
-                    invoice = await new InvoiceService().GetAsync(pi.InvoiceId, options: null, requestOptions: req);
-                if (!string.IsNullOrEmpty(invoice?.SubscriptionId))
-                    subscription = await new SubscriptionService().GetAsync(invoice.SubscriptionId, options: null, requestOptions: req);
-                if (!string.IsNullOrEmpty(charge.CustomerId))
-                    customer = await new CustomerService().GetAsync(charge.CustomerId, options: null, requestOptions: req);
-
-                // Charge provides refunded amount directly
-                var refundedAmount = charge.AmountRefunded;
-                var currency = charge.Currency;
                 var captured = charge.AmountCaptured > 0 ? charge.AmountCaptured : charge.Amount;
-                var isFull = refundedAmount >= captured;
+                isFull = charge.AmountRefunded >= captured;
+            }
 
-                Company company = null;
-                if (!string.IsNullOrEmpty(subscription?.Id))
-                {
-                    company = _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(subscription.Id);
-                }
-                if (company == null && !string.IsNullOrEmpty(customer?.Email))
-                {
-                    var user = _userAccountRoRepo.GetData(x => x.Email == customer.Email, x => x.LastUsedCompany).FirstOrDefault();
-                    if (user != null) company = user.LastUsedCompany;
-                }
+            Company company = null;
+            if (!string.IsNullOrEmpty(subscription?.Id))
+            {
+                company =
+                    _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(subscription.Id);
+            }
 
-                _paymentDbLoggerService.Log(new PaymentOperatorLog
-                {
-                    Operator = "Stripe webhook",
-                    Received = DateTime.Now,
-                    Event = $"Charge refunded {(isFull ? "FULL" : "PARTIAL")} {refundedAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
-                    JsonEvent = $"charge_id={charge.Id}"
-                });
+            if (company == null && !string.IsNullOrEmpty(customer?.Email))
+            {
+                var user = _userAccountRoRepo.GetData(x => x.Email == customer.Email, x => x.LastUsedCompany)
+                    .FirstOrDefault();
+                if (user != null) company = user.LastUsedCompany;
+            }
 
-                if (company != null && isFull)
+            _paymentDbLoggerService.Log(new PaymentOperatorLog
+            {
+                Operator = "Stripe webhook",
+                Received = DateTime.Now,
+                Event =
+                    $"Refund {(isFull ? "FULL" : "PARTIAL")} {refundAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
+                JsonEvent = $"refund_id={refund.Id}"
+            });
+
+            if (company != null && isFull)
+            {
+                _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+                if (string.IsNullOrEmpty(subscription?.Id))
                 {
-                    _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
                     _invoiceDataService.CreateCorrectiveInvoiceForRefundForLastPaymentSession(company.Guid);
                 }
+                else
+                {
+                    _invoiceDataService.CreateCorrectiveInvoiceForRefund(company.Guid, refundAmount / 100.0m,
+                        subscription.Id);
+                }
+            }
 
-                _logger.LogInformation("Handled charge.refunded: charge={ChargeId}, isFull={IsFull}, company={CompanyGuid}", charge.Id, isFull, company?.Guid);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error while handling charge.refunded.");
-            }
+            _logger.LogInformation("Handled refund: refund={RefundId}, isFull={IsFull}, company={CompanyGuid}",
+                refund.Id, isFull, company?.Guid);
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while handling refund (refund object).");
+        }
+    }
+
+    private async Task HandleChargeRefundedAsync(Charge charge)
+    {
+        try
+        {
+            var req = CreateStripeRequestOptions();
+            PaymentIntent pi = null;
+            Invoice invoice = null;
+            Subscription subscription = null;
+            Customer customer = null;
+
+            if (!string.IsNullOrEmpty(charge.PaymentIntentId))
+                pi = await new PaymentIntentService().GetAsync(charge.PaymentIntentId, options: null,
+                    requestOptions: req);
+            if (!string.IsNullOrEmpty(pi?.InvoiceId))
+                invoice = await new InvoiceService().GetAsync(pi.InvoiceId, options: null, requestOptions: req);
+            if (!string.IsNullOrEmpty(invoice?.SubscriptionId))
+                subscription =
+                    await new SubscriptionService().GetAsync(invoice.SubscriptionId, options: null,
+                        requestOptions: req);
+            if (!string.IsNullOrEmpty(charge.CustomerId))
+                customer = await new CustomerService().GetAsync(charge.CustomerId, options: null, requestOptions: req);
+
+            // Charge provides refunded amount directly
+            var refundedAmount = charge.AmountRefunded;
+            var currency = charge.Currency;
+            var captured = charge.AmountCaptured > 0 ? charge.AmountCaptured : charge.Amount;
+            var isFull = refundedAmount >= captured;
+
+            Company company = null;
+            if (!string.IsNullOrEmpty(subscription?.Id))
+            {
+                company =
+                    _paymentSessionCreator.TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(subscription.Id);
+            }
+
+            if (company == null && !string.IsNullOrEmpty(customer?.Email))
+            {
+                var user = _userAccountRoRepo.GetData(x => x.Email == customer.Email, x => x.LastUsedCompany)
+                    .FirstOrDefault();
+                if (user != null) company = user.LastUsedCompany;
+            }
+
+            _paymentDbLoggerService.Log(new PaymentOperatorLog
+            {
+                Operator = "Stripe webhook",
+                Received = DateTime.Now,
+                Event =
+                    $"Charge refunded {(isFull ? "FULL" : "PARTIAL")} {refundedAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
+                JsonEvent = $"charge_id={charge.Id}"
+            });
+
+            if (company != null && isFull)
+            {
+                _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+                _invoiceDataService.CreateCorrectiveInvoiceForRefundForLastPaymentSession(company.Guid);
+            }
+
+            _logger.LogInformation("Handled charge.refunded: charge={ChargeId}, isFull={IsFull}, company={CompanyGuid}",
+                charge.Id, isFull, company?.Guid);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while handling charge.refunded.");
+        }
+    }
 }
