@@ -287,7 +287,14 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
                 if (company != null && isFull)
                 {
                     _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
-                    _invoiceDataService.CreateCorrectiveInvoiceForRefund(company.Guid, refundAmount / 100.0m, subscription.Id);
+                    if (string.IsNullOrEmpty(subscription.Id))
+                    {
+                        _invoiceDataService.CreateCorrectiveInvoiceForRefundForLastPaymentSession(company.Guid);
+                    }
+                    else
+                    {
+                        _invoiceDataService.CreateCorrectiveInvoiceForRefund(company.Guid, refundAmount / 100.0m, subscription.Id);
+                    }
                 }
 
                 _logger.LogInformation("Handled refund: refund={RefundId}, isFull={IsFull}, company={CompanyGuid}", refund.Id, isFull, company?.Guid);
@@ -342,8 +349,11 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
                     JsonEvent = $"charge_id={charge.Id}"
                 });
 
-                if (company != null && isFull) 
+                if (company != null && isFull)
+                {
                     _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+                    _invoiceDataService.CreateCorrectiveInvoiceForRefundForLastPaymentSession(company.Guid);
+                }
 
                 _logger.LogInformation("Handled charge.refunded: charge={ChargeId}, isFull={IsFull}, company={CompanyGuid}", charge.Id, isFull, company?.Guid);
             }
