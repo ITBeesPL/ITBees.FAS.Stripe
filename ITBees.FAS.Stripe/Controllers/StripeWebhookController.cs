@@ -20,8 +20,6 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
     private readonly IPaymentSessionCreator _paymentSessionCreator;
     private readonly IPlatformSettingsService _platformSettingsService;
     private readonly IPaymentDbLoggerService _paymentDbLoggerService;
-    private readonly IReadOnlyRepository<InvoiceData> _invoiceDataRoRepo;
-    private readonly IWriteOnlyRepository<InvoiceData> _invoiceDataWoRepo;
     private readonly string _webhookSecret;
     private readonly IReadOnlyRepository<UserAccount> _userAccountRoRepo;
     private readonly IApplySubscriptionPlanToCompanyService _applySubscriptionPlanToCompanyService;
@@ -34,8 +32,6 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         IPaymentSessionCreator paymentSessionCreator,
         IPlatformSettingsService platformSettingsService,
         IPaymentDbLoggerService paymentDbLoggerService,
-        IReadOnlyRepository<InvoiceData> invoiceDataRoRepo,
-        IWriteOnlyRepository<InvoiceData> invoiceDataWoRepo,
         IReadOnlyRepository<UserAccount> userAccountRoRepo,
         IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
         IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo,
@@ -47,8 +43,6 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
         _paymentSessionCreator = paymentSessionCreator;
         _platformSettingsService = platformSettingsService;
         _paymentDbLoggerService = paymentDbLoggerService;
-        _invoiceDataRoRepo = invoiceDataRoRepo;
-        _invoiceDataWoRepo = invoiceDataWoRepo;
         _webhookSecret = platformSettingsService.GetSetting("StripeWebhookKey");
         _userAccountRoRepo = userAccountRoRepo;
         _applySubscriptionPlanToCompanyService = applySubscriptionPlanToCompanyService;
@@ -178,33 +172,10 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
 
             _applySubscriptionPlanToCompanyService.Apply(platformSubscriptionPlan, company.Guid);
 
-            var existingInvoiceData = _invoiceDataRoRepo.GetData(x => x.CompanyGuid == company.Guid)
-                .OrderByDescending(x => x.Created).FirstOrDefault();
-            if (existingInvoiceData == null)
-            {
-                _logger.LogError("No invoice data found for user: {Email}, cannot create new invoice data." +
-                                 customerEmail);
-                throw new Exception("No invoice data found for user: " + customerEmail);
-            }
+            var invoiceData = _invoiceDataService.CreateNewInvoiceBasedOnLastInvoice(company, platformSubscriptionPlan);
 
-            var newInvoiceData = new InvoiceDataIm()
-            {
-                City = existingInvoiceData.City == null ? "" : existingInvoiceData.City,
-                CompanyGuid = company.Guid,
-                Country = existingInvoiceData.Country == null ? "" : existingInvoiceData.Country,
-                CompanyName = existingInvoiceData.CompanyName == null ? "" : existingInvoiceData.CompanyName,
-                InvoiceEmail = existingInvoiceData.InvoiceEmail == null ? "" : existingInvoiceData.InvoiceEmail,
-                NIP = existingInvoiceData.NIP == null ? "" : existingInvoiceData.NIP,
-                PostCode = existingInvoiceData.PostCode == null ? "" : existingInvoiceData.PostCode,
-                Street = existingInvoiceData.Street == null ? "" : existingInvoiceData.Street,
-                SubscriptionPlanGuid = platformSubscriptionPlan.Guid,
-                InvoiceRequested = existingInvoiceData.InvoiceRequested
-            };
-
-            var invoiceData = _invoiceDataService.Create(newInvoiceData, false);
-
-            _logger.LogInformation(
-                $"Successfully processed subscription renewal for company: {company.CompanyName}, Stripe subscription id : {stripeSubscriptionId}");
+            _logger.LogInformation($"Successfully processed subscription renewal for company: {company.CompanyName}, Stripe subscription id : {stripeSubscriptionId}");
+            
             return invoiceData;
         }
         catch (Exception ex)
@@ -312,14 +283,12 @@ public class StripeWebhookController : RestfulControllerBase<StripeWebhookContro
                     Event = $"Refund {(isFull ? "FULL" : "PARTIAL")} {refundAmount} {currency} for PI={pi?.Id}, Charge={charge?.Id}, Invoice={invoice?.Id}, Subscription={subscription?.Id}, Customer={customer?.Id}, Company={(company != null ? company.Guid.ToString() : "unknown")}",
                     JsonEvent = $"refund_id={refund.Id}"
                 });
-
-                // TODO: Your domain action:
-                // - mark payment session as refunded (full/partial)
-                // - revoke or adjust access if full refund (business decision)
-                // - optionally create a credit note / negative entry in your accounting
                 
                 if (company != null && isFull)
+                {
                     _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+                    _invoiceDataService.CreateCorrectiveInvoiceForRefund(company.Guid, refundAmount / 100.0m, subscription.Id);
+                }
 
                 _logger.LogInformation("Handled refund: refund={RefundId}, isFull={IsFull}, company={CompanyGuid}", refund.Id, isFull, company?.Guid);
             }
