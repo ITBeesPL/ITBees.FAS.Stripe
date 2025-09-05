@@ -77,7 +77,7 @@ namespace ITBees.FAS.Stripe.Controllers
                 _paymentSessionCreator.CloseSuccessfulPayment(
                     Guid.Parse(session.ClientReferenceId),
                     session.Created,
-                    session.Subscription.Id,
+                    session.SubscriptionId,
                     stripeEvent.Id);
                 _logger.LogDebug("Closing successfulPayment - done.");
                 return Ok();
