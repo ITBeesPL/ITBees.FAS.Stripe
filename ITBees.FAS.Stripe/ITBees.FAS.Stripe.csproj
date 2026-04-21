@@ -8,11 +8,11 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.330" />
+        <PackageReference Include="ITBees.FAS.Payments" Version="8.0.331" />
         <PackageReference Include="ITBees.Fas.Setup" Version="8.0.15" />
         <PackageReference Include="ITBees.Interfaces" Version="8.0.71" />
         <PackageReference Include="ITBees.Models" Version="8.0.94" />
-        <PackageReference Include="ITBees.UserManager" Version="8.0.376" />
+        <PackageReference Include="ITBees.UserManager" Version="8.0.377" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
         <PackageReference Include="Stripe.net" Version="48.5.0" />
     </ItemGroup>
