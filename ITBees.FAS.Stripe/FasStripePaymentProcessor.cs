@@ -27,6 +27,15 @@ namespace ITBees.FAS.Stripe
                 ? _platformSettingsService.GetSetting("PaymentCancelUrl")
                 : failUrl;
 
+            var metadata = new Dictionary<string, string>
+            {
+                { StripeMetadataKeys.PaymentSessionGuid, fasPayment.PaymentSessionGuid.ToString() }
+            };
+            if (fasPayment.SubscriptionPlanGuid.HasValue)
+                metadata[StripeMetadataKeys.SubscriptionPlanGuid] = fasPayment.SubscriptionPlanGuid.Value.ToString();
+            if (fasPayment.CompanyGuid.HasValue)
+                metadata[StripeMetadataKeys.CompanyGuid] = fasPayment.CompanyGuid.Value.ToString();
+
             var options = new SessionCreateOptions()
             {
                 SuccessUrl = $"{successUrlSetting}?guid={fasPayment.PaymentSessionGuid}",
@@ -37,24 +46,16 @@ namespace ITBees.FAS.Stripe
                 // Ensure a Customer object is created so you always have a stable cus_... id
                 CustomerCreation = oneTimePayment ? "always" : null,
 
-                // Seed metadata at Checkout time so that future webhooks can resolve without DB/email
-                // TODO: fill these values from your domain (if available at this layer)
+                // Seeded at checkout, so renewal webhooks (invoice.parent.subscription_details.metadata)
+                // know the company and the plan really being paid for.
                 SubscriptionData = oneTimePayment
                     ? null
                     : new SessionSubscriptionDataOptions
                     {
-                        Metadata = new Dictionary<string, string>
-                        {
-                            // e.g.: { "companyGuid", myCompanyGuid.ToString() },
-                            // e.g.: { "subscriptionPlanGuid", myPlanGuid.ToString() }
-                        }
+                        Metadata = new Dictionary<string, string>(metadata)
                     },
 
-                // Optional: useful for debugging cross-references
-                Metadata = new Dictionary<string, string>
-                {
-                    { "paymentSessionGuid", fasPayment.PaymentSessionGuid.ToString() }
-                }
+                Metadata = metadata
             };
 
             foreach (var product in fasPayment.Products)
