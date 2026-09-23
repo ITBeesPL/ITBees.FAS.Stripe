@@ -11,6 +11,7 @@ using ITBees.Interfaces.Repository;
 using ITBees.Models.Companies;
 using ITBees.Models.Users;
 using ITBees.Models.Payments;
+using ITBees.FAS.Stripe.Services;
 
 namespace ITBees.FAS.Stripe.Controllers
 {
@@ -26,6 +27,10 @@ namespace ITBees.FAS.Stripe.Controllers
         private readonly IReadOnlyRepository<PlatformSubscriptionPlan> _platformSubscriptionPlanRoRepo;
         private readonly IInvoiceDataService _invoiceDataService;
         private readonly IFasPaymentProcessor _paymentProcessor;
+        private readonly IReadOnlyRepository<PaymentSession> _paymentSessionRoRepo;
+        private readonly IReadOnlyRepository<Company> _companyRoRepo;
+        private readonly ICompanyStripeSubscriptionService? _companyStripeSubscriptionService;
+        private readonly IStripeSubscriptionLookupService? _stripeSubscriptionLookupService;
 
         public StripeWebhookController(
             ILogger<StripeWebhookController> logger,
@@ -36,7 +41,13 @@ namespace ITBees.FAS.Stripe.Controllers
             IApplySubscriptionPlanToCompanyService applySubscriptionPlanToCompanyService,
             IReadOnlyRepository<PlatformSubscriptionPlan> platformSubscriptionPlanRoRepo,
             IInvoiceDataService invoiceDataService,
-            IFasPaymentProcessor paymentProcessor
+            IFasPaymentProcessor paymentProcessor,
+            IReadOnlyRepository<PaymentSession> paymentSessionRoRepo,
+            IReadOnlyRepository<Company> companyRoRepo,
+            // Optional: registered by FasStripeSetup; without them replaced subscriptions are not cancelled
+            // and a full refund always revokes the company's access (previous behaviour).
+            ICompanyStripeSubscriptionService? companyStripeSubscriptionService = null,
+            IStripeSubscriptionLookupService? stripeSubscriptionLookupService = null
         ) : base(logger)
         {
             _logger = logger;
@@ -49,6 +60,10 @@ namespace ITBees.FAS.Stripe.Controllers
             _platformSubscriptionPlanRoRepo = platformSubscriptionPlanRoRepo;
             _invoiceDataService = invoiceDataService;
             _paymentProcessor = paymentProcessor;
+            _paymentSessionRoRepo = paymentSessionRoRepo;
+            _companyRoRepo = companyRoRepo;
+            _companyStripeSubscriptionService = companyStripeSubscriptionService;
+            _stripeSubscriptionLookupService = stripeSubscriptionLookupService;
         }
 
         [HttpPost]
@@ -74,12 +89,20 @@ namespace ITBees.FAS.Stripe.Controllers
 
                 // NOTE: In Basil / Stripe.net v48 the property is `Subscription` (string), not `SubscriptionId`.
                 _logger.LogDebug("Closing successfulPayment...");
+                var paymentSessionGuid = Guid.Parse(session.ClientReferenceId);
                 _paymentSessionCreator.CloseSuccessfulPayment(
-                    Guid.Parse(session.ClientReferenceId),
+                    paymentSessionGuid,
                     session.Created,
                     session.SubscriptionId,
-                    stripeEvent.Id);
+                    stripeEvent.Id,
+                    StripeMetadataKeys.GetGuid(session.Metadata, StripeMetadataKeys.SubscriptionPlanGuid));
                 _logger.LogDebug("Closing successfulPayment - done.");
+
+                if (session.Mode == "subscription" && string.IsNullOrEmpty(session.SubscriptionId) == false)
+                {
+                    await CancelReplacedSubscriptions(paymentSessionGuid, session.SubscriptionId);
+                }
+
                 return Ok();
             }
 
@@ -96,10 +119,7 @@ namespace ITBees.FAS.Stripe.Controllers
 
                 var stripeSubscriptionId = invoice.Parent?.SubscriptionDetails?.SubscriptionId;
 
-                var invoiceData = await ApplySubscriptionPlanAndCreateInvoiceForRenewal(
-                    invoice.CustomerEmail,
-                    invoice.Created,
-                    stripeSubscriptionId);
+                var invoiceData = await ApplySubscriptionPlanAndCreateInvoiceForRenewal(invoice, stripeSubscriptionId);
 
                 var stripeEventId = stripeEvent.Id;
 
@@ -158,48 +178,17 @@ namespace ITBees.FAS.Stripe.Controllers
         }
 
         private async Task<InvoiceDataVm> ApplySubscriptionPlanAndCreateInvoiceForRenewal(
-            string customerEmail,
-            DateTime startingFrom,
+            Invoice invoice,
             string stripeSubscriptionId = null)
         {
+            var customerEmail = invoice.CustomerEmail;
+            var startingFrom = invoice.Created;
+            var subscriptionMetadata = invoice.Parent?.SubscriptionDetails?.Metadata;
             try
             {
-                Company company = null;
-                PlatformSubscriptionPlan platformSubscriptionPlan = null;
-
-                // Try mapping from subscription id if present
-                company = _paymentSessionCreator
-                    .TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(stripeSubscriptionId);
-
-                if (company == null)
-                {
-                    _logger.LogInformation("Processing subscription renewal for email: {Email}", customerEmail);
-
-                    var user = _userAccountRoRepo.GetData(x => x.Email == customerEmail, x => x.LastUsedCompany)
-                        .FirstOrDefault();
-
-                    if (user == null)
-                    {
-                        _logger.LogError("User not found for email: {Email}", customerEmail);
-                        throw new Exception($"User not found for email: {customerEmail}");
-                    }
-
-                    if (user.LastUsedCompany.CompanyPlatformSubscription?.SubscriptionPlanGuid == null)
-                    {
-                        _logger.LogError("No active subscription plan for company: {Company}",
-                            user.LastUsedCompany.CompanyName);
-                        throw new Exception("No active subscription plan for company: " +
-                                            user.LastUsedCompany.CompanyName);
-                    }
-
-                    company = user.LastUsedCompany;
-                    platformSubscriptionPlan = _platformSubscriptionPlanRoRepo.GetFirst(x =>
-                        x.Guid == user.LastUsedCompany.CompanyPlatformSubscription.SubscriptionPlanGuid);
-                }
-                else
-                {
-                    platformSubscriptionPlan = company.CompanyPlatformSubscription.SubscriptionPlan;
-                }
+                var company = GetRenewedCompany(subscriptionMetadata, stripeSubscriptionId, customerEmail);
+                var platformSubscriptionPlan =
+                    GetRenewedSubscriptionPlan(invoice, subscriptionMetadata, stripeSubscriptionId, company);
 
                 if (company == null || platformSubscriptionPlan == null)
                 {
@@ -211,9 +200,9 @@ namespace ITBees.FAS.Stripe.Controllers
                     customerEmail, platformSubscriptionPlan.PlanName);
 
                 // Apply extension starting from the invoice creation moment
-                _applySubscriptionPlanToCompanyService.Apply(platformSubscriptionPlan, company.Guid, startingFrom);
+                ApplyRenewedPlan(company, platformSubscriptionPlan, startingFrom, stripeSubscriptionId);
 
-                // Create new invoice data based on last invoice for this company/plan
+                // Invoice data snapshot bound to the plan Stripe really charged for - the invoice is issued from it.
                 var invoiceData = _invoiceDataService.CreateNewInvoiceBasedOnLastInvoice(company, platformSubscriptionPlan);
 
                 _logger.LogInformation(
@@ -228,6 +217,192 @@ namespace ITBees.FAS.Stripe.Controllers
                     "Error in ApplySubscriptionPlanAndCreateInvoiceForRenewal for email: {Email}, Stripe subscription id: {SubId}",
                     customerEmail, stripeSubscriptionId);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Company of a renewed subscription: metadata (subscriptions bought after it was introduced), the checkout
+        /// payment session, and only for legacy data the last used company of the customer's e-mail.
+        /// </summary>
+        private Company GetRenewedCompany(IDictionary<string, string>? subscriptionMetadata,
+            string stripeSubscriptionId, string customerEmail)
+        {
+            var metadataCompanyGuid =
+                StripeMetadataKeys.GetGuid(subscriptionMetadata, StripeMetadataKeys.CompanyGuid);
+            if (metadataCompanyGuid != null)
+            {
+                var metadataCompany = _companyRoRepo.GetData(x => x.Guid == metadataCompanyGuid.Value)
+                    .FirstOrDefault();
+                if (metadataCompany != null)
+                    return metadataCompany;
+            }
+
+            var company = _paymentSessionCreator
+                .TryGetCompanyWithSubscriptionPlanFromPaymentSubscriptionId(stripeSubscriptionId);
+            if (company != null)
+                return company;
+
+            _logger.LogInformation("Processing subscription renewal for email: {Email}", customerEmail);
+
+            var user = _userAccountRoRepo.GetData(x => x.Email == customerEmail, x => x.LastUsedCompany)
+                .FirstOrDefault();
+
+            if (user == null)
+            {
+                _logger.LogError("User not found for email: {Email}", customerEmail);
+                throw new Exception($"User not found for email: {customerEmail}");
+            }
+
+            if (user.LastUsedCompany.CompanyPlatformSubscription?.SubscriptionPlanGuid == null)
+            {
+                _logger.LogError("No active subscription plan for company: {Company}",
+                    user.LastUsedCompany.CompanyName);
+                throw new Exception("No active subscription plan for company: " +
+                                    user.LastUsedCompany.CompanyName);
+            }
+
+            return user.LastUsedCompany;
+        }
+
+        /// <summary>
+        /// Plan the renewal really charged for. It used to be the company's current plan, which is wrong whenever
+        /// the company has another (parallel) subscription or an operator assigned a plan manually - e.g. a yearly
+        /// subscription renewed and got invoiced and applied as the 3-month plan.
+        /// </summary>
+        private PlatformSubscriptionPlan GetRenewedSubscriptionPlan(Invoice invoice,
+            IDictionary<string, string>? subscriptionMetadata, string stripeSubscriptionId, Company company)
+        {
+            var metadataPlanGuid =
+                StripeMetadataKeys.GetGuid(subscriptionMetadata, StripeMetadataKeys.SubscriptionPlanGuid);
+            if (metadataPlanGuid != null)
+            {
+                var metadataPlan = _platformSubscriptionPlanRoRepo.GetData(x => x.Guid == metadataPlanGuid.Value)
+                    .FirstOrDefault();
+                if (metadataPlan != null)
+                    return metadataPlan;
+
+                _logger.LogWarning("Plan {PlanGuid} from metadata of subscription {SubscriptionId} not found",
+                    metadataPlanGuid, stripeSubscriptionId);
+            }
+
+            // Legacy subscription (plan not stored in Stripe metadata) - match by the charged amount and period.
+            var companyPlanGuid = company?.CompanyPlatformSubscription?.SubscriptionPlanGuid;
+            var companyCurrentPlan = companyPlanGuid == null
+                ? null
+                : _platformSubscriptionPlanRoRepo.GetData(x => x.Guid == companyPlanGuid.Value).FirstOrDefault();
+            var checkoutPlan = string.IsNullOrEmpty(stripeSubscriptionId)
+                ? null
+                : _paymentSessionRoRepo.GetData(
+                        x => x.OperatorTransactionId == stripeSubscriptionId && x.FromSubscriptionRenew == false,
+                        x => x.InvoiceData, x => x.InvoiceData.SubscriptionPlan)
+                    .OrderBy(x => x.Created)
+                    .FirstOrDefault()?.InvoiceData?.SubscriptionPlan;
+
+            var line = invoice.Lines?.Data?.FirstOrDefault(x => x.Parent?.SubscriptionItemDetails != null)
+                       ?? invoice.Lines?.Data?.FirstOrDefault();
+            if (line?.Period == null)
+            {
+                _logger.LogWarning("Renewal invoice {InvoiceId} has no billed line, using the company's current plan",
+                    invoice.Id);
+                return companyCurrentPlan ?? checkoutPlan;
+            }
+
+            var recurringPlans = _platformSubscriptionPlanRoRepo
+                .GetData(x => x.IsTrial == false && x.IsOneTimePayment == false)
+                .ToList();
+            var billedPlan = StripeSubscriptionPlanMatcher.Match(line.Amount, line.Currency,
+                plan => StripeSubscriptionPlanMatcher.MatchesPeriod(plan, line.Period.Start, line.Period.End),
+                new[] { checkoutPlan, companyCurrentPlan },
+                recurringPlans);
+
+            if (billedPlan != null && billedPlan.Guid != companyCurrentPlan?.Guid)
+            {
+                var message =
+                    $"Renewal of subscription {stripeSubscriptionId} charged {line.Amount / 100m} {line.Currency} " +
+                    $"for {line.Period.Start:yyyy-MM-dd} - {line.Period.End:yyyy-MM-dd}, which is plan {billedPlan.PlanName}; " +
+                    $"company {company?.CompanyName} has plan {companyCurrentPlan?.PlanName} assigned - using {billedPlan.PlanName}";
+                _logger.LogWarning(message);
+                _paymentDbLoggerService.Log(new PaymentOperatorLog
+                {
+                    Operator = "Stripe webhook",
+                    Received = DateTime.Now,
+                    Event = message,
+                    JsonEvent = $"invoice_id={invoice.Id}"
+                });
+            }
+
+            return billedPlan;
+        }
+
+        /// <summary>
+        /// A renewal never shortens the access the company already has - with a parallel subscription or after an
+        /// operator's manual extension the renewed period may end earlier than the current one.
+        /// </summary>
+        private void ApplyRenewedPlan(Company company, PlatformSubscriptionPlan platformSubscriptionPlan,
+            DateTime startingFrom, string stripeSubscriptionId)
+        {
+            // Same formula as IApplySubscriptionPlanToCompanyService.Apply.
+            var renewedActiveTo = startingFrom
+                .AddMonths(platformSubscriptionPlan.Interval)
+                .AddDays(platformSubscriptionPlan.IntervalDays);
+            var currentSubscription = company.CompanyPlatformSubscription;
+
+            if (currentSubscription?.SubscriptionActiveTo != null &&
+                currentSubscription.SubscriptionActiveTo > renewedActiveTo)
+            {
+                var message =
+                    $"Renewal of subscription {stripeSubscriptionId} ({platformSubscriptionPlan.PlanName} to {renewedActiveTo:yyyy-MM-dd}) " +
+                    $"would shorten plan {currentSubscription.SubscriptionPlanName} of company {company.CompanyName} " +
+                    $"active to {currentSubscription.SubscriptionActiveTo:yyyy-MM-dd} - company subscription left unchanged";
+                if (currentSubscription.SubscriptionPlanGuid == platformSubscriptionPlan.Guid)
+                {
+                    _logger.LogInformation(message);
+                    return;
+                }
+
+                _logger.LogWarning(message + " (parallel subscription?)");
+                _paymentDbLoggerService.Log(new PaymentOperatorLog
+                {
+                    Operator = "Stripe webhook",
+                    Received = DateTime.Now,
+                    Event = message + " (parallel subscription?)",
+                    JsonEvent = $"subscription_id={stripeSubscriptionId}"
+                });
+                return;
+            }
+
+            _applySubscriptionPlanToCompanyService.Apply(platformSubscriptionPlan, company.Guid, startingFrom);
+        }
+
+        /// <summary>
+        /// A company that bought a new recurring plan must not keep paying for the old one. Never throws -
+        /// the checkout itself is already closed at this point.
+        /// </summary>
+        private async Task CancelReplacedSubscriptions(Guid paymentSessionGuid, string newSubscriptionId)
+        {
+            try
+            {
+                if (_companyStripeSubscriptionService == null)
+                {
+                    _logger.LogWarning(
+                        "ICompanyStripeSubscriptionService is not registered - subscriptions replaced by {SubscriptionId} are not cancelled",
+                        newSubscriptionId);
+                    return;
+                }
+
+                var paymentSession = _paymentSessionRoRepo
+                    .GetData(x => x.Guid == paymentSessionGuid, x => x.InvoiceData)
+                    .FirstOrDefault();
+                var companyGuid = paymentSession?.InvoiceData?.CompanyGuid;
+                if (companyGuid == null || paymentSession!.OrderPackGuid != null)
+                    return;
+
+                await _companyStripeSubscriptionService.CancelReplacedSubscriptions(companyGuid.Value,
+                    newSubscriptionId);
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, "Cancelling subscriptions replaced by {SubscriptionId} failed", newSubscriptionId);
             }
         }
 
@@ -340,7 +515,7 @@ namespace ITBees.FAS.Stripe.Controllers
                 if (company != null && isFull)
                 {
                     // Business rule: on full refund revoke the subscription access and issue corrective invoice
-                    _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+                    await RevokeUnlessOtherSubscriptionBills(company, subscriptionId, refund.Id);
 
                     if (string.IsNullOrEmpty(subscriptionId))
                     {
@@ -418,7 +593,7 @@ namespace ITBees.FAS.Stripe.Controllers
 
                 if (company != null && isFull)
                 {
-                    _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
+                    await RevokeUnlessOtherSubscriptionBills(company, subscriptionId, charge.Id);
                     _invoiceDataService.CreateCorrectiveInvoiceForRefundForLastPaymentSession(company.Guid);
                 }
 
@@ -429,6 +604,44 @@ namespace ITBees.FAS.Stripe.Controllers
             {
                 _logger.LogError(ex, "Error while handling charge.refunded.");
             }
+        }
+
+        /// <summary>
+        /// A full refund revokes the company's access - unless the refunded payment belongs to one of several
+        /// parallel subscriptions (e.g. refunding the duplicate charge of a plan change): the company still pays
+        /// through the other one, so it must keep its plan.
+        /// </summary>
+        private async Task RevokeUnlessOtherSubscriptionBills(Company company, string? refundedSubscriptionId,
+            string refundReference)
+        {
+            if (_stripeSubscriptionLookupService != null && string.IsNullOrEmpty(refundedSubscriptionId) == false)
+            {
+                var otherSubscriptionIds =
+                    (await _stripeSubscriptionLookupService.GetCompanySubscriptionIdsAsync(company.Guid))
+                    .Where(x => x != refundedSubscriptionId);
+                foreach (var otherSubscriptionId in otherSubscriptionIds)
+                {
+                    var otherSubscription =
+                        await _stripeSubscriptionLookupService.GetSubscriptionAsync(otherSubscriptionId);
+                    if (otherSubscription == null || _stripeSubscriptionLookupService.IsBilling(otherSubscription) == false)
+                        continue;
+
+                    var message =
+                        $"Full refund {refundReference} of subscription {refundedSubscriptionId} - access of company " +
+                        $"{company.CompanyName} NOT revoked, it still pays through subscription {otherSubscriptionId}";
+                    _logger.LogWarning(message);
+                    _paymentDbLoggerService.Log(new PaymentOperatorLog
+                    {
+                        Operator = "Stripe webhook",
+                        Received = DateTime.Now,
+                        Event = message,
+                        JsonEvent = $"company_guid={company.Guid}"
+                    });
+                    return;
+                }
+            }
+
+            _applySubscriptionPlanToCompanyService.Revoke(company.Guid);
         }
 
         /// <summary>
